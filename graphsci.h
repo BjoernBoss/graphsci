@@ -5,7 +5,7 @@
 #include <cinttypes>
 #include <algorithm>
 
-namespace ascp {
+namespace ascg {
 	namespace detail {
 		struct Node {
 			size_t row = 0;
@@ -131,13 +131,20 @@ namespace ascp {
 			size_t target = pNodes[last].in;
 			pNodes[last].in += 2;
 
-			/* translate the nodes to actual rows */
-			first = pNodes[first].row;
+			/* translate the nodes to actual rows (first row to the actual first row to be modified) */
+			first = pNodes[first].row + 1;
 			last = pNodes[last].row;
 
+			/* check if the row ahead is blocked by another component or if the two nodes
+			*	are directly back to back, in which case another entry needs to be added */
+			if (first == last || (pRows[first][current] != ' ' && pRows[first][current] != '-')) {
+				fInsertRow(first);
+				++last;
+			}
+
 			/* iterate until the nodes have been connected */
-			while (first + 2 < last) {
-				std::string& next = pRows[++first];
+			while (first + 1 < last) {
+				std::string& next = pRows[first];
 
 				/* check if the path diretly above is blocked, in which case an intermediate row needs to be added */
 				if (next[current] != ' ')
@@ -150,7 +157,7 @@ namespace ascp {
 					/* check how many steps to the right are required until the top is free again */
 					size_t shift = 2;
 					while (current + shift < pWidth && pRows[first + 1][current + shift] != ' ') {
-						if (pRows[first][current + shift] != ' ') {
+						if (next[current + shift] != ' ' && next[current + shift] != '|') {
 							shift -= 2;
 							break;
 						}
@@ -166,14 +173,12 @@ namespace ascp {
 						current += shift;
 					}
 				}
+
+				/* advance to the next row */
+				++first;
 			}
 
-			/* check if the nodes are direct row neighbors, in which case a filler-row needs to be added */
-			if (++first == last)
-				fInsertRow(last++);
-
-			/* check if a simple connecting line is enough (if between two noes, there can at most be '-'
-			*	or ' ' above, as any other nodes would add spacing, or no connections could be there) */
+			/* check if a simple connecting line is enough (between two nodes, there can at most be '-' or ' ' above) */
 			if (current == target) {
 				pRows[first][current] = '|';
 				return;
@@ -190,12 +195,11 @@ namespace ascp {
 			/* insert the crossing */
 			fInsertCrossing(first, current, target);
 		}
-		ascp::Graph finalize() {
-			ascp::Graph out{ .rows = pRows };
+		ascg::Graph finalize() {
+			ascg::Graph out{ .rows = pRows };
 			for (size_t i = 0; i < pNodes.size(); ++i)
 				out.map.push_back(pNodes[i].row);
 			return out;
 		}
 	};
-
 }
