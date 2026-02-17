@@ -4,6 +4,11 @@
 #include <vector>
 #include <cinttypes>
 #include <algorithm>
+#include <set>
+#include <utility>
+
+
+#include <ustring/ustring.h>
 
 namespace ascg {
 	namespace detail {
@@ -12,6 +17,14 @@ namespace ascg {
 			size_t in = 0;
 			size_t out = 0;
 			bool added = false;
+		};
+
+		struct RangeSort {
+			bool operator()(const std::pair<size_t, size_t>& a, const std::pair<size_t, size_t>& b) const {
+				if (a.first < b.first)
+					return true;
+				return (a.first == b.first) && (a.second < b.second);
+			}
 		};
 	}
 
@@ -74,6 +87,18 @@ namespace ascg {
 					line[i] = '-';
 			}
 		}
+		void fEstablishNode(size_t index) {
+			/* check if new rows need to be added to the output */
+			while (pNodes.size() <= index) {
+				pNodes.push_back({ .row = pRows.size(), .in = 0, .out = 0, .added = false });
+				pRows.emplace_back(pWidth, ' ');
+			}
+
+			/* check if the node has already been added */
+			detail::Node& node = pNodes[index];
+			if (node.added)
+				return;
+		}
 
 	public:
 		void addNode(size_t index, size_t edges) {
@@ -130,6 +155,7 @@ namespace ascg {
 			pNodes[first].out += 2;
 			size_t target = pNodes[last].in;
 			pNodes[last].in += 2;
+			fEnsureWidth(std::max<size_t>(current, target) + 1);
 
 			/* translate the nodes to actual rows (first row to the actual first row to be modified) */
 			first = pNodes[first].row + 1;
@@ -200,6 +226,145 @@ namespace ascg {
 			for (size_t i = 0; i < pNodes.size(); ++i)
 				out.map.push_back(pNodes[i].row);
 			return out;
+		}
+	};
+
+	/* make use of [pFirst], [pLast] */
+	class _Builder {
+	private:
+		std::vector<std::pair<size_t, size_t>> pRanges;
+		size_t pFirst = 0;
+		size_t pLast = 0;
+
+	private:
+		size_t fDistance(size_t x, size_t y) const {
+			return (x < y ? (y - x) : (x - y));
+		}
+		bool fHasPrev(const std::vector<std::vector<std::pair<size_t, size_t>>>& strands, size_t index, size_t node) const {
+			while (true) {
+				if (strands[index].back().first == node || strands[index].back().second == node)
+					return true;
+				if (index-- == 0)
+					return false;
+			}
+		}
+		bool fHasNext(const std::vector<std::vector<std::pair<size_t, size_t>>>& strands, size_t index, size_t node) const {
+			for (; index < strands.size(); ++index) {
+				if (strands[index].back().first == node || strands[index].back().second == node)
+					return true;
+			}
+			return false;
+		}
+		size_t fCountNext(const std::vector<std::vector<std::pair<size_t, size_t>>>& strands, size_t index, size_t node) const {
+			size_t count = 0;
+			for (; index < strands.size(); ++index) {
+				if (strands[index].back().first == node || strands[index].back().second == node)
+					return count;
+				if (strands[index].back().second > node)
+					++count;
+			}
+			return 0;
+		}
+
+	public:
+		void connect(size_t a, size_t b) {
+			if (a == b)
+				return;
+			a = std::min<size_t>(a, b), b = std::max<size_t>(a, b);
+
+			/* update the overall limits and insert the range */
+			if (pRanges.empty())
+				pFirst = a, pLast = b;
+			else
+				pFirst = std::min<size_t>(pFirst, a), pLast = std::max<size_t>(pLast, b);
+			pRanges.emplace_back(a, b);
+		}
+		std::vector<std::vector<std::pair<size_t, size_t>>> finalize() {
+			std::vector<std::vector<std::pair<size_t, size_t>>> strands;
+
+			/* insert all ranges to the active set (sorted by start index, and then length) */
+			std::set<std::pair<size_t, size_t>, detail::RangeSort> open(pRanges.begin(), pRanges.end());
+
+			/* assign the ranges to the separate strands */
+			while (!open.empty()) {
+				std::pair<size_t, size_t> next = *open.begin();
+				open.erase(open.begin());
+
+				/* initialize the costs */
+				size_t costs = fCountNext(strands, 0, next.first) + fCountNext(strands, 0, next.second);
+				std::vector<size_t> bestBefore{ 0 };
+				size_t bestCosts = costs;
+
+				/* iterate over the strands and compute the costs for the strand lying inbetween */
+				for (size_t i = 0; i < strands.size(); ++i) {
+					const std::pair<size_t, size_t>& test = strands[i].back();
+
+					/* check if the end of [test] lies within [next], in which case its costs need to shift */
+					if (test.second > next.first && test.second < next.second) {
+						if (i > 0 && fHasPrev(strands, i - 1, test.second))
+							--costs;
+						if (fHasNext(strands, i + 1, test.second))
+							++costs;
+					}
+
+					/* check if the start of [next] lies within [test], in which case its costs need to shift */
+					if (next.first > test.first && next.first < test.second) {
+						if (fHasNext(strands, i + 1, next.first))
+							--costs;
+						if (i > 0 && fHasPrev(strands, i - 1, next.first))
+							++costs;
+					}
+
+					/* check if the end of [next] lies within [test], in which case its costs need to shift */
+					if (next.second < test.second) {
+						if (fHasNext(strands, i + 1, next.second))
+							--costs;
+						if (i > 0 && fHasPrev(strands, i - 1, next.second))
+							++costs;
+					}
+
+					/* check if the new row would cost less or can also be considered */
+					if (costs > bestCosts)
+						continue;
+					if (costs < bestCosts)
+						bestBefore.clear();
+					bestBefore.push_back(i + 1);
+					bestCosts = costs;
+				}
+
+				/* check if one of the solutions does not require a row to be added */
+				bool added = false;
+				for (size_t before : bestBefore) {
+					if (before > 0 && strands[before - 1].back().second <= next.first)
+						strands[before - 1].push_back(next);
+					else if (before < strands.size() && strands[before].back().second <= next.first)
+						strands[before].push_back(next);
+					else
+						continue;
+					added = true;
+					break;
+				}
+
+				/* check if the entry has not yet been added, in which case the entry closest to the
+				*	edge can be chosen (to ensure the larger entries for same start move outward) */
+				if (!added)
+					strands.insert(strands.begin() + bestBefore.back(), { next });
+
+
+				for (size_t i = 0; i < 6; ++i)
+					str::Fmt("{: >4}", i + 1);
+				str::PrintLn();
+				for (size_t i = 0; i < strands.size(); ++i) {
+					std::string line;
+					for (const auto& r : strands[i]) {
+						line.append(r.first * 4 - line.size(), ' ');
+						line.append(1, '[').append((r.second - r.first) * 4 - 2, '-').append(1, ']');
+					}
+					str::PrintLn(line);
+				}
+				str::PrintLn();
+			}
+			return {};
 		}
 	};
 }
