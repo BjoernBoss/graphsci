@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <set>
 #include <utility>
+#include <limits>
 
 
 #include <ustring/ustring.h>
@@ -229,6 +230,342 @@ namespace ascg {
 		}
 	};
 
+	class _Render {
+	private:
+		enum class CellState : uint8_t {
+			none,
+			state,
+			edge,
+			cross
+		};
+		struct Cell {
+			size_t edges[2] = { 0 };
+			CellState state = CellState::none;
+		};
+
+	private:
+		std::vector<std::vector<Cell>> pGrid;
+		size_t pWidth = 0;
+		size_t pStamp = 0;
+
+	public:
+		void connect(size_t a, size_t b) {
+
+		}
+		std::vector<std::string> finalize() const {
+			std::vector<std::string> out;
+			for (size_t i = 0; i < pGrid.size(); ++i) {
+				std::string& row = out.emplace_back();
+				for (size_t j = 0; j < pGrid[i].size(); ++j) {
+					if (pGrid[i][j].state == CellState::none)
+						row.push_back(' ');
+					else if (pGrid[i][j].state == CellState::state)
+						row.push_back('#');
+					else if (pGrid[i][j].state == CellState::cross)
+						row.push_back('|');
+					else if ((j == 0 ? 0 : pGrid[i][j - 1].edges[0]) == pGrid[i][j].edges[0] && (j + 1 == pWidth ? 0 : pGrid[i][j + 1].edges[0]) == pGrid[i][j].edges[0])
+						row.push_back('-');
+					else if ((i == 0 ? 0 : pGrid[i - 1][j].edges[0]) == pGrid[i][j].edges[0] && (i + 1 == pGrid.size() ? 0 : pGrid[i + 1][j].edges[0]) == pGrid[i][j].edges[0])
+						row.push_back('|');
+					else
+						row.push_back('+');
+				}
+			}
+			return out;
+		}
+	};
+
+	namespace detail {
+		enum class StrandHit : uint8_t {
+			none,
+			node,
+			edge
+		};
+		struct Range {
+			size_t first = 0;
+			size_t last = 0;
+		};
+		class OptNumber {
+		private:
+			size_t pValue = std::numeric_limits<size_t>::max();
+
+		public:
+			OptNumber() = default;
+			OptNumber(size_t v) : pValue{ v } {}
+
+		public:
+			bool has() const {
+				return (pValue != std::numeric_limits<size_t>::max());
+			}
+			size_t get() const {
+				return (pValue == std::numeric_limits<size_t>::max() ? 0 : pValue);
+			}
+		};
+
+		class Strands {
+		public:
+			std::vector<std::vector<detail::Range>> strands;
+			size_t conflicts = 0;
+			size_t distance = 0;
+
+		private:
+			detail::StrandHit fCheckStrand(size_t strand, size_t node) const {
+				const std::vector<detail::Range>& s = strands[strand];
+
+				/* check if any of the ranges of the given strand start
+				*	or end at the given node or if it lies within a range */
+				for (size_t i = s.size(); i > 0; --i) {
+					if (s[i - 1].first == node || s[i - 1].last == node)
+						return detail::StrandHit::node;
+					if (s[i - 1].last < node)
+						break;
+					if (s[i - 1].first < node)
+						return detail::StrandHit::edge;
+				}
+				return detail::StrandHit::none;
+			}
+			detail::OptNumber fPrevEdgesCut(size_t strand, size_t node) const {
+				size_t count = 0;
+				for (; strand > 0; --strand) {
+					if (detail::StrandHit hit = fCheckStrand(strand - 1, node); hit == detail::StrandHit::node)
+						return count;
+					else if (hit == detail::StrandHit::edge)
+						++count;
+				}
+				return detail::OptNumber{};
+			}
+			detail::OptNumber fNextEdgesCut(size_t strand, size_t node, bool self) const {
+				size_t count = 0;
+				for (strand += (self ? 0 : 1); strand < strands.size(); ++strand) {
+					if (detail::StrandHit hit = fCheckStrand(strand, node); hit == detail::StrandHit::node)
+						return count;
+					else if (hit == detail::StrandHit::edge)
+						++count;
+				}
+				return detail::OptNumber{};
+			}
+			detail::OptNumber fFitsIntoStrand(size_t strand, const detail::Range& range) const {
+				const std::vector<detail::Range>& s = strands[strand];
+
+				/* iterate over the ranges of the strand and check if the slot is vacant */
+				for (size_t i = s.size(); i > 0; --i) {
+					if (s[i - 1].last <= range.first)
+						return i;
+					if (s[i - 1].first < range.last)
+						return detail::OptNumber{};
+				}
+				return 0;
+			}
+			void fInsert(detail::Range range, size_t beforeStrand) {
+				/* check if the range can be appended to existing strands or insert it */
+				if (beforeStrand > 0 && strands[beforeStrand - 1].back().last <= range.first)
+					strands[--beforeStrand].push_back(range);
+				else if (beforeStrand < strands.size() && strands[beforeStrand].back().last <= range.first)
+					strands[beforeStrand].push_back(range);
+				else
+					strands.insert(strands.begin() + beforeStrand, { range });
+
+				/* update the crossings to include the costs of all nodes separated due to the new range */
+				for (size_t i = range.first + 1; i < range.last; ++i) {
+					if (fPrevEdgesCut(beforeStrand, i).has() && fNextEdgesCut(beforeStrand, i, false).has())
+						++conflicts;
+				}
+
+				/* check if the start of the node now results in edges above cutting the node (only if not already done by the neighbor) */
+				const std::vector<detail::Range>& thisStrand = strands[beforeStrand];
+				if (thisStrand.size() == 1 || thisStrand[thisStrand.size() - 2].last < range.first) {
+					detail::OptNumber firstPrev = fPrevEdgesCut(beforeStrand, range.first), firstNext = fNextEdgesCut(beforeStrand, range.first, false);
+					if (firstPrev.has() != firstNext.has())
+						conflicts += firstPrev.get() + firstNext.get();
+				}
+
+				/* check if the end of the node now results in edges below cutting the node */
+				detail::OptNumber lastPrev = fPrevEdgesCut(beforeStrand, range.last), lastNext = fNextEdgesCut(beforeStrand, range.last, false);
+				if (lastPrev.has() != lastNext.has())
+					conflicts += lastPrev.get() + lastNext.get();
+			}
+			void fReduce(size_t strand) {
+				std::vector<detail::Range>& thisStrand = strands[strand];
+				detail::Range range = thisStrand.back();
+
+				/* check if the start of the node previously resulted in cut edges, which
+				*	are now resolved (only if this is not still held alive by the neighbor) */
+				if (thisStrand.size() == 1 || thisStrand[thisStrand.size() - 2].last < range.first) {
+					detail::OptNumber firstPrev = fPrevEdgesCut(strand, range.first), firstNext = fNextEdgesCut(strand, range.first, false);
+					if (firstPrev.has() != firstNext.has())
+						conflicts -= firstPrev.get() + firstNext.get();
+				}
+
+				/* check if the end of the node previously resulted in cut edges, which are now resolved */
+				detail::OptNumber lastPrev = fPrevEdgesCut(strand, range.last), lastNext = fNextEdgesCut(strand, range.last, false);
+				if (lastPrev.has() != lastNext.has())
+					conflicts -= lastPrev.get() + lastNext.get();
+
+				/* update the crossings to remove the costs of all nodes previously separated due to the range */
+				for (size_t i = range.first + 1; i < range.last; ++i) {
+					if (fPrevEdgesCut(strand, i).has() && fNextEdgesCut(strand, i, false).has())
+						--conflicts;
+				}
+
+				/* check if the entire strand can be removed and otherwise just remove the range */
+				if (thisStrand.size() == 1)
+					strands.erase(strands.begin() + strand);
+				else {
+					thisStrand.pop_back();
+					++strand;
+				}
+				return;
+
+				/* check if ranges from strands higher up can be moved to reduce the spread */
+				for (size_t i = strand; i < strands.size(); ++i) {
+					if (i == 0)
+						continue;
+					std::vector<detail::Range>& s = strands[i];
+
+					/* iterate over the strands, and try to move those, which overlapped with the original range, down */
+					for (size_t j = s.size(); j > 0; --j) {
+						if (s[j - 1].last < range.first || s[j - 1].first > range.last)
+							break;
+						detail::OptNumber index{};
+						size_t target = i;
+
+						/* check how far it can be moved down */
+						while (target > 0) {
+							detail::OptNumber next = fFitsIntoStrand(target - 1, s[j - 1]);
+							if (!next.has())
+								break;
+							index = next, --target;
+						}
+
+						/* check if a new slot has been found and move the range over */
+						if (!index.has())
+							continue;
+						strands[target].insert(strands[target].begin() + index.get(), s[j - 1]);
+						s.erase(s.begin() + j - 1);
+					}
+
+					/* check if the entire strand can be removed */
+					if (s.empty()) {
+						strands.erase(strands.begin() + i);
+						--i;
+					}
+				}
+			}
+
+		public:
+			size_t insert(detail::Range range) {
+				/* initialize the count as if the range was inserted before the first stran */
+				size_t conflicting = fNextEdgesCut(0, range.first, true).get() + fNextEdgesCut(0, range.last, true).get();
+
+				/* setup insertion before the first strand as the current best pick (for two strands
+				*	of equal conflicts, choose the one, which does not require a new strand to be added) */
+				size_t bestBefore = 0, bestConflicting = conflicting;
+				bool bestMergeable = (bestBefore < strands.size() && strands[bestBefore].back().last <= range.first);
+
+				/* iterate over the strands, and update the conflict count, if the range were
+				*	inserted after the strand, and find the least expensive insertion strand */
+				for (size_t i = 0; i < strands.size(); ++i) {
+					const std::vector<detail::Range>& strand = strands[i];
+
+					/* iterate over the skipped ranges within the strand */
+					for (size_t j = strand.size(); j > 0; --j) {
+						const detail::Range& test = strand[j - 1];
+						if (test.last <= range.first)
+							break;
+						if (test.first >= range.last)
+							continue;
+
+						/* check if the beginning of the [test] range passed through the inserted range,
+						*	or vice versa, and update the new conflicting counts down and upwards */
+						if (test.first < range.first) {
+							if (fPrevEdgesCut(i, range.first).has())
+								++conflicting;
+							if (fNextEdgesCut(i, range.first, false).has())
+								--conflicting;
+						}
+						else if (test.first > range.first) {
+							if (fNextEdgesCut(i, test.first, false).has())
+								++conflicting;
+							if (fPrevEdgesCut(i, test.first).has())
+								--conflicting;
+						}
+
+						/* check if the end of the range to be inserted passed through the [test] range, or vice versa,
+						*	and update the new conflicting counts down and upwards (for a test-range within the range
+						*	to be inserted, dont update the counts, if its direct neighbor lies at the stame node, as
+						*	this might otherwise lead to double reductions for single values) */
+						if (test.last > range.last) {
+							if (fPrevEdgesCut(i, range.last).has())
+								++conflicting;
+							if (fNextEdgesCut(i, range.last, false).has())
+								--conflicting;
+						}
+						else if (test.last < range.last && (j == strand.size() || strand[j].first > test.last)) {
+							if (fNextEdgesCut(i, test.last, false).has())
+								++conflicting;
+							if (fPrevEdgesCut(i, test.last).has())
+								--conflicting;
+						}
+					}
+
+					/* check if this insertion spot is better suited than the current best slot */
+					if (conflicting > bestConflicting)
+						continue;
+					bool mergable = ((i > 0 && strands[i - 1].back().last <= range.first) || (strand.back().last <= range.first));
+					if (conflicting < bestConflicting || (mergable && !bestMergeable))
+						bestBefore = i + 1, bestConflicting = conflicting, bestMergeable = mergable;
+				}
+
+				/* insert the new range at the given position */
+				fInsert(range, bestBefore);
+				return bestConflicting;
+			}
+			std::vector<detail::Range> dropOverlap(detail::Range range) {
+				std::vector<detail::Range> dropped;
+
+				/* iterate over the strands and remove all ranges, which overlap, or pass, the given range
+				*	(back to front, as the reduction may merge strands and may move ranges further down) */
+				for (size_t i = strands.size(); i > 0; --i) {
+					std::vector<detail::Range>& strand = strands[i - 1];
+					if (strand.back().first == range.first && strand.back().last == range.last)
+						continue;
+
+					/* check if the last strand can be removed */
+					if (strand.back().last <= range.first)
+						continue;
+
+					/* store the dropped range and remove it */
+					dropped.push_back(strand.back());
+					fReduce(i - 1);
+				}
+				return dropped;
+			}
+			void print() const {
+				/* find the highest node-number */
+				size_t max = 0;
+				for (size_t i = 0; i < strands.size(); ++i)
+					max = std::max<size_t>(max, strands[i].back().last);
+
+				/* print the numbers */
+				for (size_t i = 0; i <= max; ++i)
+					str::Fmt("{: <4}", i);
+				str::PrintLn(" (Conflicts: ", conflicts, ')');
+
+				/* print the separate strands */
+				for (size_t i = 0; i < strands.size(); ++i) {
+					std::string line;
+					for (const auto& r : strands[i]) {
+						line.append(r.first * 4 - line.size(), ' ');
+						line.append(1, '[').append((r.last - r.first) * 4 - 2, '-').append(1, ']');
+					}
+					str::PrintLn(line);
+				}
+			}
+		};
+	}
+
+
+	/* add self-loops?/double-edges?/remove 'std::pair'/add directions? */
 	/* make use of [pFirst], [pLast] */
 	class _Builder {
 	private:
@@ -268,9 +605,10 @@ namespace ascg {
 
 	public:
 		void connect(size_t a, size_t b) {
-			if (a == b)
+			if (a > b)
+				std::swap(a, b);
+			else if (a == b)
 				return;
-			a = std::min<size_t>(a, b), b = std::max<size_t>(a, b);
 
 			/* update the overall limits and insert the range */
 			if (pRanges.empty())
@@ -365,6 +703,38 @@ namespace ascg {
 				str::PrintLn();
 			}
 			return {};
+		}
+
+		void _finalize() {
+			detail::Strands strands;
+
+			/* insert all ranges to the active set (sorted by start index, and then length) */
+			std::set<std::pair<size_t, size_t>, detail::RangeSort> open(pRanges.begin(), pRanges.end());
+
+			/* assign the ranges to the separate strands */
+			while (!open.empty()) {
+				std::pair<size_t, size_t> next = *open.begin();
+				open.erase(open.begin());
+
+				/* try each insertion and pick the best */
+				size_t costs = strands.insert({ next.first, next.second });
+				strands.print();
+				str::PrintLn();
+
+				if (costs > 0) {
+					auto dropped = strands.dropOverlap({ next.first, next.second });
+
+					strands.print();
+					str::PrintLn();
+					for (const auto& r : dropped)
+						open.insert({ r.first, r.last });
+
+					//for (const auto& range : ranges)
+					//	_insert(strands, { range.first, range.second }, nullptr);
+					//strands.print();
+					//str::PrintLn();
+				}
+			}
 		}
 	};
 }
