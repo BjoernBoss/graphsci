@@ -5,6 +5,7 @@
 #include <cinttypes>
 #include <algorithm>
 #include <set>
+#include <map>
 #include <utility>
 #include <limits>
 
@@ -306,7 +307,6 @@ namespace ascg {
 		public:
 			std::vector<std::vector<detail::Range>> strands;
 			size_t conflicts = 0;
-			size_t distance = 0;
 
 		private:
 			detail::StrandHit fCheckStrand(size_t strand, size_t node) const {
@@ -344,17 +344,14 @@ namespace ascg {
 				}
 				return detail::OptNumber{};
 			}
-			detail::OptNumber fFitsIntoStrand(size_t strand, const detail::Range& range) const {
-				const std::vector<detail::Range>& s = strands[strand];
-
-				/* iterate over the ranges of the strand and check if the slot is vacant */
-				for (size_t i = s.size(); i > 0; --i) {
-					if (s[i - 1].last <= range.first)
-						return i;
-					if (s[i - 1].first < range.last)
-						return detail::OptNumber{};
+			detail::OptNumber fNextNodeDistance(size_t strand, size_t node, bool self) const {
+				size_t count = 0;
+				for (strand += (self ? 0 : 1); strand < strands.size(); ++strand) {
+					if (fCheckStrand(strand, node) == detail::StrandHit::node)
+						return count;
+					++count;
 				}
-				return 0;
+				return detail::OptNumber{};
 			}
 			void fInsert(detail::Range range, size_t beforeStrand) {
 				/* check if the range can be appended to existing strands or insert it */
@@ -414,52 +411,18 @@ namespace ascg {
 					thisStrand.pop_back();
 					++strand;
 				}
-				return;
-
-				/* check if ranges from strands higher up can be moved to reduce the spread */
-				for (size_t i = strand; i < strands.size(); ++i) {
-					if (i == 0)
-						continue;
-					std::vector<detail::Range>& s = strands[i];
-
-					/* iterate over the strands, and try to move those, which overlapped with the original range, down */
-					for (size_t j = s.size(); j > 0; --j) {
-						if (s[j - 1].last < range.first || s[j - 1].first > range.last)
-							break;
-						detail::OptNumber index{};
-						size_t target = i;
-
-						/* check how far it can be moved down */
-						while (target > 0) {
-							detail::OptNumber next = fFitsIntoStrand(target - 1, s[j - 1]);
-							if (!next.has())
-								break;
-							index = next, --target;
-						}
-
-						/* check if a new slot has been found and move the range over */
-						if (!index.has())
-							continue;
-						strands[target].insert(strands[target].begin() + index.get(), s[j - 1]);
-						s.erase(s.begin() + j - 1);
-					}
-
-					/* check if the entire strand can be removed */
-					if (s.empty()) {
-						strands.erase(strands.begin() + i);
-						--i;
-					}
-				}
 			}
 
 		public:
 			size_t insert(detail::Range range) {
 				/* initialize the count as if the range was inserted before the first stran */
 				size_t conflicting = fNextEdgesCut(0, range.first, true).get() + fNextEdgesCut(0, range.last, true).get();
+				detail::OptNumber distFirstPrev = {}, distFirstNext = fNextNodeDistance(0, range.first, true);
+				detail::OptNumber distLastPrev = {}, distLastNext = fNextNodeDistance(0, range.last, true);
 
 				/* setup insertion before the first strand as the current best pick (for two strands
 				*	of equal conflicts, choose the one, which does not require a new strand to be added) */
-				size_t bestBefore = 0, bestConflicting = conflicting;
+				size_t bestBefore = 0, bestConflicting = conflicting, bestDistance = (distFirstNext.get() + distLastNext.get());
 				bool bestMergeable = (bestBefore < strands.size() && strands[bestBefore].back().last <= range.first);
 
 				/* iterate over the strands, and update the conflict count, if the range were
@@ -508,12 +471,33 @@ namespace ascg {
 						}
 					}
 
+					/* update the distance counters and compute the new distance */
+					if (distFirstPrev.has())
+						distFirstPrev = distFirstPrev.get() + 1;
+					if (distLastPrev.has())
+						distLastPrev = distLastPrev.get() + 1;
+					if (distFirstNext.has()) {
+						if (distFirstNext.get() > 0)
+							distFirstNext = distFirstNext.get() - 1;
+						else
+							distFirstPrev = 0, distFirstNext = fNextNodeDistance(i, range.first, false);
+					}
+					if (distLastNext.has()) {
+						if (distLastNext.get() > 0)
+							distLastNext = distLastNext.get() - 1;
+						else
+							distLastPrev = 0, distLastNext = fNextNodeDistance(i, range.last, false);
+					}
+					size_t distance = (distFirstPrev.get() + distLastPrev.get() + distFirstNext.get() + distLastNext.get());
+
 					/* check if this insertion spot is better suited than the current best slot */
 					if (conflicting > bestConflicting)
 						continue;
+					if (conflicting == bestConflicting && distance > bestDistance)
+						continue;
 					bool mergable = ((i > 0 && strands[i - 1].back().last <= range.first) || (strand.back().last <= range.first));
-					if (conflicting < bestConflicting || (mergable && !bestMergeable))
-						bestBefore = i + 1, bestConflicting = conflicting, bestMergeable = mergable;
+					if (conflicting < bestConflicting || distance < bestDistance || (mergable && !bestMergeable))
+						bestBefore = i + 1, bestConflicting = conflicting, bestDistance = distance, bestMergeable = mergable;
 				}
 
 				/* insert the new range at the given position */
@@ -540,18 +524,61 @@ namespace ascg {
 				}
 				return dropped;
 			}
+
+
+		private:
+			detail::OptNumber fFitsIntoStrand(const std::vector<detail::Range>& strand, const detail::Range& range) const {
+				/* iterate over the ranges of the strand and check if the slot is vacant */
+				for (size_t i = strand.size(); i > 0; --i) {
+					if (strand[i - 1].last <= range.first)
+						return i;
+					if (strand[i - 1].first < range.last)
+						return detail::OptNumber{};
+				}
+				return 0;
+			}
+		public:
 			void print() const {
-				/* find the highest node-number */
-				size_t max = 0;
-				for (size_t i = 0; i < strands.size(); ++i)
-					max = std::max<size_t>(max, strands[i].back().last);
+				std::vector<std::vector<detail::Range>> reduced;
+				size_t lastNode = 0;
+
+				/* iterate over the ranges and insert them to the
+				*	reduced strand set and find the last node index */
+				for (size_t i = 0; i < strands.size(); ++i) {
+					for (size_t j = 0; j < strands[i].size(); ++j) {
+						lastNode = std::max<size_t>(lastNode, strands[i][j].last);
+
+						/* find the reduced slot to add the range to */
+						detail::OptNumber index{};
+						size_t target = reduced.size();
+						while (target > 0) {
+							detail::OptNumber temp = fFitsIntoStrand(reduced[target - 1], strands[i][j]);
+							if (!temp.has())
+								break;
+							index = temp, --target;
+						}
+						if (index.has())
+							reduced[target].insert(reduced[target].begin() + index.get(), strands[i][j]);
+						else
+							reduced.push_back({ strands[i][j] });
+					}
+				}
 
 				/* print the numbers */
-				for (size_t i = 0; i <= max; ++i)
+				for (size_t i = 0; i <= lastNode; ++i)
 					str::Fmt("{: <4}", i);
 				str::PrintLn(" (Conflicts: ", conflicts, ')');
 
 				/* print the separate strands */
+				//for (size_t i = 0; i < reduced.size(); ++i) {
+				//	std::string line;
+				//	for (const auto& r : reduced[i]) {
+				//		line.append(r.first * 4 - line.size(), ' ');
+				//		line.append(1, '[').append((r.last - r.first) * 4 - 2, '-').append(1, ']');
+				//	}
+				//	str::PrintLn(line);
+				//}
+
 				for (size_t i = 0; i < strands.size(); ++i) {
 					std::string line;
 					for (const auto& r : strands[i]) {
@@ -563,7 +590,6 @@ namespace ascg {
 			}
 		};
 	}
-
 
 	/* add self-loops?/double-edges?/remove 'std::pair'/add directions? */
 	/* make use of [pFirst], [pLast] */
@@ -705,8 +731,98 @@ namespace ascg {
 			return {};
 		}
 
+	private:
+		struct Node {
+			std::set<std::pair<size_t, size_t>>::iterator source;
+			size_t stamp = 0;
+			size_t iteration = 0;
+			bool mapped = false;
+		};
+		struct Sorter {
+			bool operator()(std::pair<size_t, size_t> a, std::pair<size_t, size_t> b) const {
+				size_t la = (a.second - a.first), lb = (b.second - b.first);
+				if (la != lb)
+					return (la < lb);
+				return (a.first < b.first);
+			}
+		};
+
+	public:
 		void _finalize() {
 			detail::Strands strands;
+
+			std::map<size_t, Node> nodes;
+			std::set<std::pair<size_t, size_t>, Sorter> remaining;
+			for (const std::pair<size_t, size_t>& r : pRanges) {
+				nodes[r.first] = Node{};
+				nodes[r.second] = Node{};
+				remaining.insert(r);
+			}
+			size_t stamp = 0;
+
+			while (!remaining.empty()) {
+				++stamp;
+				std::set<std::pair<size_t, size_t>>::iterator next = remaining.end();
+
+				/* find the next best match */
+				for (size_t iteration = 0;; ++iteration) {
+					bool dirty = false;
+
+					/* take the next step through the graph */
+					for (auto it = remaining.begin(); it != remaining.end(); ++it) {
+						std::pair<size_t, size_t> r = *it;
+
+						bool firstVisit = (nodes[r.first].mapped || (nodes[r.first].stamp == stamp && nodes[r.first].iteration < iteration));
+						bool secondVisit = (nodes[r.second].mapped || (nodes[r.second].stamp == stamp && nodes[r.second].iteration < iteration));
+						if (!firstVisit && !secondVisit)
+							continue;
+						dirty = true;
+
+						if (firstVisit != secondVisit) {
+							size_t next = (firstVisit ? r.second : r.first), prev = (firstVisit ? r.first : r.second);
+
+							if (nodes[next].stamp != stamp) {
+								nodes[next].stamp = stamp;
+								nodes[next].iteration = iteration;
+								nodes[next].source = (iteration == 0 ? it : nodes[prev].source);
+							}
+							else if (Sorter{}(*it, *nodes[next].source))
+								nodes[next].source = it;
+							continue;
+						}
+
+						std::set<std::pair<size_t, size_t>>::iterator source = it;
+						if (!nodes[r.first].mapped && !nodes[r.second].mapped)
+							source = (Sorter{}(*nodes[r.first].source, *nodes[r.second].source) ? nodes[r.first] : nodes[r.second]).source;
+
+						if (next == remaining.end() || Sorter{}(*source, *next))
+							next = source;
+					}
+					if (!dirty || next != remaining.end())
+						break;
+				}
+
+				/* if no range was found, select the first range */
+				if (next == remaining.end())
+					next = remaining.begin();
+
+				/* mark the range as processed and the nodes as visited */
+				std::pair<size_t, size_t> range = *next;
+				remaining.erase(next);
+				nodes[range.first].mapped = true;
+				nodes[range.second].mapped = true;
+
+				/* insert the range */
+				strands.insert({ range.first, range.second });
+				strands.print();
+				str::PrintLn();
+			}
+
+			return;
+
+
+
+
 
 			/* insert all ranges to the active set (sorted by start index, and then length) */
 			std::set<std::pair<size_t, size_t>, detail::RangeSort> open(pRanges.begin(), pRanges.end());
