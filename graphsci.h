@@ -301,6 +301,9 @@ namespace ascg {
 			size_t get() const {
 				return (pValue == std::numeric_limits<size_t>::max() ? 0 : pValue);
 			}
+			size_t& base() {
+				return pValue;
+			}
 		};
 
 		class Strands {
@@ -353,14 +356,61 @@ namespace ascg {
 				}
 				return detail::OptNumber{};
 			}
+			size_t fShiftStrands(size_t strand, detail::Range range) {
+				if (strand >= strands.size()) {
+					strands.emplace_back();
+					return 0;
+				}
+				std::vector<detail::Range>& s0 = strands[strand];
+
+				/* find the affected indices */
+				size_t first = 0, count = 0, index = 0;
+				for (size_t i = s0.size(); i > 0; --i) {
+					if (s0[i - 1].first >= range.last)
+						continue;
+					else if (s0[i - 1].last <= range.first) {
+						index = i;
+						break;
+					}
+					first = i - 1, ++count;
+				}
+
+				/* check if the space needs to be made available */
+				if (count == 0)
+					return index;
+				size_t target = fShiftStrands(strand + 1, { .first = s0[first].first, .last = s0[first + count - 1].last });
+				std::vector<detail::Range>& s1 = strands[strand];
+
+				/* write the range into the next strand and remove them from the current strand */
+				strands[strand + 1].insert(strands[strand + 1].begin() + target, s1.begin() + first, s1.begin() + first + count);
+				s1.erase(s1.begin() + first, s1.begin() + first + count);
+				return index;
+			}
+			detail::OptNumber fFitsIntoStrand(const std::vector<detail::Range>& strand, const detail::Range& range) const {
+				/* iterate over the ranges of the strand and check if the slot is vacant */
+				for (size_t i = strand.size(); i > 0; --i) {
+					if (strand[i - 1].last <= range.first)
+						return i;
+					if (strand[i - 1].first < range.last)
+						return detail::OptNumber{};
+				}
+				return 0;
+			}
 			void fInsert(detail::Range range, size_t beforeStrand) {
-				/* check if the range can be appended to existing strands or insert it */
-				if (beforeStrand > 0 && strands[beforeStrand - 1].back().last <= range.first)
-					strands[--beforeStrand].push_back(range);
-				else if (beforeStrand < strands.size() && strands[beforeStrand].back().last <= range.first)
-					strands[beforeStrand].push_back(range);
-				else
-					strands.insert(strands.begin() + beforeStrand, { range });
+				/* check if the strand can also be added to previous strands */
+				detail::OptNumber index;
+				while (beforeStrand > 0) {
+					detail::OptNumber temp = fFitsIntoStrand(strands[beforeStrand - 1], range);
+					if (!temp.has())
+						break;
+					index = temp, --beforeStrand;
+				}
+
+				/* make space for the range and insert it */
+				if (!index.has())
+					index = fShiftStrands(beforeStrand, range);
+				std::vector<detail::Range>& s = strands[beforeStrand];
+				s.insert(s.begin() + index.get(), range);
 
 				/* update the crossings to include the costs of all nodes separated due to the new range */
 				for (size_t i = range.first + 1; i < range.last; ++i) {
@@ -369,8 +419,7 @@ namespace ascg {
 				}
 
 				/* check if the start of the node now results in edges above cutting the node (only if not already done by the neighbor) */
-				const std::vector<detail::Range>& thisStrand = strands[beforeStrand];
-				if (thisStrand.size() == 1 || thisStrand[thisStrand.size() - 2].last < range.first) {
+				if (index.get() == 0 || s[index.get() - 1].last < range.first) {
 					detail::OptNumber firstPrev = fPrevEdgesCut(beforeStrand, range.first), firstNext = fNextEdgesCut(beforeStrand, range.first, false);
 					if (firstPrev.has() != firstNext.has())
 						conflicts += firstPrev.get() + firstNext.get();
@@ -424,6 +473,7 @@ namespace ascg {
 				*	of equal conflicts, choose the one, which does not require a new strand to be added) */
 				size_t bestBefore = 0, bestConflicting = conflicting, bestDistance = (distFirstNext.get() + distLastNext.get());
 				bool bestMergeable = (bestBefore < strands.size() && strands[bestBefore].back().last <= range.first);
+				size_t options = 1;
 
 				/* iterate over the strands, and update the conflict count, if the range were
 				*	inserted after the strand, and find the least expensive insertion strand */
@@ -497,8 +547,11 @@ namespace ascg {
 						continue;
 					bool mergable = ((i > 0 && strands[i - 1].back().last <= range.first) || (strand.back().last <= range.first));
 					if (conflicting < bestConflicting || distance < bestDistance || (mergable && !bestMergeable))
-						bestBefore = i + 1, bestConflicting = conflicting, bestDistance = distance, bestMergeable = mergable;
+						bestBefore = i + 1, bestConflicting = conflicting, bestDistance = distance, bestMergeable = mergable, options = 1;
+					else if (mergable == bestMergeable)
+						++options;
 				}
+				str::PrintLn("Options: ", options);
 
 				/* insert the new range at the given position */
 				fInsert(range, bestBefore);
@@ -525,18 +578,6 @@ namespace ascg {
 				return dropped;
 			}
 
-
-		private:
-			detail::OptNumber fFitsIntoStrand(const std::vector<detail::Range>& strand, const detail::Range& range) const {
-				/* iterate over the ranges of the strand and check if the slot is vacant */
-				for (size_t i = strand.size(); i > 0; --i) {
-					if (strand[i - 1].last <= range.first)
-						return i;
-					if (strand[i - 1].first < range.last)
-						return detail::OptNumber{};
-				}
-				return 0;
-			}
 		public:
 			void print() const {
 				std::vector<std::vector<detail::Range>> reduced;
@@ -732,11 +773,250 @@ namespace ascg {
 		}
 
 	private:
+		struct Sorted {
+			bool operator()(std::pair<size_t, size_t> a, std::pair<size_t, size_t> b) const {
+				if (a.first != b.first)
+					return (a.first < b.first);
+				return (a.second < b.second);
+			}
+		};
+
+	private:
+		struct Point {
+			std::pair<size_t, size_t> range;
+			size_t mapPrev = 0;
+			size_t mapNext = 0;
+			Point* prev = nullptr;
+			Point* next = nullptr;
+		};
+		struct Layer {
+			std::vector<Point> points;
+			std::pair<size_t, size_t> node;
+			size_t index = 0;
+			size_t crossings = 0;
+		};
+
+	private:
+		size_t fPeekSwap(Layer& layer) const {
+
+			// handle try-swap-backward
+		}
+		void fSwapPoints(Point& prev, Point& next) const {
+			/* rotate the references to previous and upcoming points around */
+			if (prev.prev != nullptr)
+				prev.prev->next = &next;
+			if (prev.next != nullptr)
+				prev.next->prev = &next;
+			if (next.prev != nullptr)
+				next.prev->next = &prev;
+			if (next.next != nullptr)
+				next.next->prev = &prev;
+
+			/* update the mapping indices themselves */
+			if (prev.next != nullptr && next.next != nullptr)
+				std::swap(prev.mapNext, next.mapNext);
+			if (prev.prev != nullptr && next.prev != nullptr)
+				std::swap(prev.mapPrev, next.mapPrev);
+
+			/* swap the points themselves */
+			std::swap(prev, next);
+		}
+		void fSwapUpcoming(std::vector<Layer>& layers, size_t index) const {
+			/* check if any crossings need to be fixed */
+			Layer& layer = layers[index];
+			if (layer.crossings == 0)
+				return;
+
+			/* iterate over all points and try to swap any positive crossings with the last non-postivie crossing */
+			for (size_t thisIndex = 1; thisIndex < layer.points.size(); ++thisIndex) {
+				if (layer.points[thisIndex].prev == nullptr)
+					continue;
+
+				/* loop until the crossing is not positive anymore */
+				while (true) {
+					/* check if this is a positive edge, or if the next edge needs to be inspected (null-crossings can be ignored) */
+					Point& next = layer.points[thisIndex];
+					if (next.prev->mapNext >= next.mapPrev)
+						break;
+
+					/* find the last relevant node (must exist, as a positive crossing implies it
+					*	skipped something over, they must also be neighbors on this layers mapping) */
+					size_t prevIndex = thisIndex - 1;
+					while (layer.points[prevIndex].prev == nullptr)
+						--prevIndex;
+					Point& prev = layer.points[prevIndex];
+
+					/* check if the previous entry is a positive, in which case nothing can be done (null mappings
+					*	are possible, as this implies, that the positive edge must at least cross the null-edge) */
+					if (prev.prev->mapNext < prev.mapPrev)
+						break;
+					bool thisNode = (thisIndex >= layer.node.first && thisIndex < layer.node.first + layer.node.second);
+					bool prevNode = (prevIndex >= layer.node.first && prevIndex < layer.node.first + layer.node.second);
+
+					/* check if either both, or neither, belonged to the node, in which case they can
+					*	just be swapped, and the positive can be re-used to be potentially swapped again
+					*	(cannot induce crossings in upcoming layers, as they have not yet been mapped) */
+					if (thisNode == prevNode) {
+						fSwapPoints(prev, next);
+						--layer.crossings, thisIndex = prevIndex;
+						continue;
+					}
+
+					/* count the total number of points part of this node and the number of points, which
+					*	are mapped before the previous points mapping (relevant to determine its costs) */
+					size_t mappedBeforePrev = 0, nodeMapped = 0;
+					for (size_t j = layer.node.first; j < layer.node.first + layer.node.second; ++j) {
+						if (layer.points[j].prev == nullptr)
+							continue;
+						++nodeMapped;
+						if (layer.points[j].prev->mapNext < prev.prev->mapNext)
+							++mappedBeforePrev;
+					}
+
+					/* check if the current point belongs to the node, in which case, in which case a swap would result
+					*	in all points, which also belong to the node, which are mapped before the previous point on the
+					*	previous layer, to reduce the crossings, and all other nodes to increase the crossings */
+					if (thisNode) {
+						if (mappedBeforePrev <= nodeMapped - mappedBeforePrev)
+							break;
+
+						/* rotate the previous point to be placed after all points of the node and
+						*	reset the index to repeat the process on the point at the new front */
+						for (size_t j = prevIndex + 1; j < layer.node.first + layer.node.second; ++j)
+							fSwapPoints(layer.points[j - 1], layer.points[j]);
+						layer.crossings -= (2 * mappedBeforePrev - nodeMapped);
+						--layer.node.first, thisIndex = prevIndex;
+						continue;
+					}
+
+					/* if the previous point is part of the node, the same rules apply, as the other way around, but rotated */
+					if (mappedBeforePrev >= nodeMapped - mappedBeforePrev)
+						break;
+
+					/* rotate the current point to lie before all points of the node
+					*	and reset the index accordingly to try to restart the process */
+					for (size_t j = thisIndex; j > layer.node.first; --j)
+						fSwapPoints(layer.points[j - 1], layer.points[j]);
+					layer.crossings -= (nodeMapped - 2 * mappedBeforePrev);
+					thisIndex = layer.node.first++;
+				}
+			}
+		}
+
+	private:
+		void fFinalize() const {
+			/* setup the list of open ranges (sorted by their start) */
+			std::set<std::pair<size_t, size_t>, Sorted> open(pRanges.begin(), pRanges.end());
+			std::vector<Layer> layers;
+			size_t crossings = 0;
+
+			/* iterate over the open ranges until they and their endpoints have all been inserted into the layers,
+			*	and the crossing count has been computed (no need to map previous for the first layer, as the first
+			*	layer can only consist of a single node, in which case the ranges can be swapped arbitrarily) */
+			std::map<std::pair<size_t, size_t>, size_t> previous;
+			while (true) {
+				/* insert all upcoming nodes, which need to be added to this layer */
+				if (!open.empty()) {
+					auto itNext = open.begin();
+
+					/* check if a new layer needs to be pushed */
+					if (layers.empty() || layers.back().index < itNext->first)
+						layers.push_back(Layer{ .index = itNext->first });
+					Layer& layer = layers.back();
+
+					/* insert all ranges, which start before or at the current layer */
+					while (!open.empty() && itNext->first <= layer.index) {
+						layer.points.push_back({ .range = *itNext });
+						layer.index = std::min<size_t>(itNext->first, layer.index);
+						itNext = open.erase(itNext);
+					}
+				}
+				Layer& layer = layers.back();
+
+				/* sort the ranges in the layer to ensure ranges, which belong to this layer
+				*	(i.e. start/end at this layer), are neighbors (must at least be one) */
+				layer.node = { 0, 0 };
+				for (size_t i = 0; i < layer.points.size(); ++i) {
+					if (layer.points[i].range.first != layer.index && layer.points[i].range.second != layer.index)
+						continue;
+					if (layer.node.second != i)
+						std::swap(layer.points[i], layer.points[layer.node.second]);
+					++layer.node.second;
+				}
+
+				/* iterate over the ranges again (after sorting, as this rotates the ranges around)
+				*	and setup the previous layer indices and upcoming map and count the crossings */
+				std::map<std::pair<size_t, size_t>, size_t> upcoming;
+				size_t nextMapPrev = 0, nextMapNext = 0;
+				for (size_t i = 0; i < layer.points.size(); ++i) {
+					Point& point = layer.points[i];
+
+					/* check if this range will be part of the upcoming layer */
+					if (point.range.second > layer.index) {
+						point.mapNext = nextMapNext++;
+						upcoming.insert({ point.range, i });
+					}
+
+					/* check if this range is part of the previous layer and link the points
+					*	together (references are stable, as the lists have already been populated
+					*	with all points, and will not be reallocated anymore, just moved) */
+					if (point.range.first >= layer.index)
+						continue;
+					point.prev = &layers[layers.size() - 2].points[previous.find(point.range)->second];
+					point.mapPrev = nextMapPrev++;
+					point.prev->next = &layer.points[i];
+
+					/* for negative crossings, every crossed connection is a crossing */
+					if (point.mapPrev < point.prev->mapNext)
+						layer.crossings += (point.prev->mapNext - point.mapPrev);
+
+					/* for positive crossings, every non-negative mapping, which starts after the
+					*	current point and ends before the current point results in a crossing */
+					else for (size_t j = i; j > 0; --j) {
+						const Point& prev = layer.points[j - 1];
+						if (prev.prev == nullptr)
+							continue;
+						if (prev.mapPrev <= point.prev->mapNext)
+							break;
+						if (prev.prev->mapNext <= prev.mapPrev && prev.prev->mapNext > point.prev->mapNext && prev.mapPrev < point.mapPrev)
+							++layer.crossings;
+					}
+				}
+
+				/* try to reduce the forward crossing count */
+				fSwapUpcoming(layers, layers.size() - 1);
+
+				/* update the new previous map and the total crossing count */
+				crossings += layer.crossings;
+				previous = std::move(upcoming);
+
+				/* iterate over the current layer and setup the
+				*	extension of all open ranges into the next layer */
+				Layer next{ .index = std::numeric_limits<size_t>::max() };
+				for (const Point& point : layer.points) {
+					if (point.range.second <= layer.index)
+						continue;
+					next.points.push_back({ .range = point.range });
+					next.index = std::min<size_t>(next.index, point.range.second);
+				}
+
+				/* check if new ranges have been found to be inserted
+				*	as the next layer or if the end has been reached */
+				if (!next.points.empty())
+					layers.emplace_back(std::move(next));
+				else if (open.empty())
+					break;
+			}
+
+			return;
+		}
+
+	private:
 		struct Node {
-			std::set<std::pair<size_t, size_t>>::iterator source;
 			size_t stamp = 0;
 			size_t iteration = 0;
 			bool mapped = false;
+			std::set<std::pair<size_t, size_t>>::iterator source;
 		};
 		struct Sorter {
 			bool operator()(std::pair<size_t, size_t> a, std::pair<size_t, size_t> b) const {
@@ -750,6 +1030,8 @@ namespace ascg {
 	public:
 		void _finalize() {
 			detail::Strands strands;
+
+			fFinalize();
 
 			std::map<size_t, Node> nodes;
 			std::set<std::pair<size_t, size_t>, Sorter> remaining;
@@ -765,6 +1047,7 @@ namespace ascg {
 				std::set<std::pair<size_t, size_t>>::iterator next = remaining.end();
 
 				/* find the next best match */
+				std::set<std::pair<size_t, size_t>, Sorter> used;
 				for (size_t iteration = 0;; ++iteration) {
 					bool dirty = false;
 
@@ -772,10 +1055,14 @@ namespace ascg {
 					for (auto it = remaining.begin(); it != remaining.end(); ++it) {
 						std::pair<size_t, size_t> r = *it;
 
-						bool firstVisit = (nodes[r.first].mapped || (nodes[r.first].stamp == stamp && nodes[r.first].iteration < iteration));
-						bool secondVisit = (nodes[r.second].mapped || (nodes[r.second].stamp == stamp && nodes[r.second].iteration < iteration));
+						bool firstVisit = (nodes[r.first].mapped || nodes[r.first].stamp == stamp);
+						bool secondVisit = (nodes[r.second].mapped || nodes[r.second].stamp == stamp);
 						if (!firstVisit && !secondVisit)
 							continue;
+
+						if (used.contains(r))
+							continue;
+						used.insert(r);
 						dirty = true;
 
 						if (firstVisit != secondVisit) {
@@ -784,9 +1071,9 @@ namespace ascg {
 							if (nodes[next].stamp != stamp) {
 								nodes[next].stamp = stamp;
 								nodes[next].iteration = iteration;
-								nodes[next].source = (iteration == 0 ? it : nodes[prev].source);
+								nodes[next].source = (nodes[prev].mapped ? it : nodes[prev].source);
 							}
-							else if (Sorter{}(*it, *nodes[next].source))
+							else if (nodes[prev].mapped && Sorter{}(*it, *nodes[next].source))
 								nodes[next].source = it;
 							continue;
 						}
@@ -819,6 +1106,9 @@ namespace ascg {
 			}
 
 			return;
+
+
+
 
 
 
