@@ -784,8 +784,8 @@ namespace ascg {
 	private:
 		struct Point {
 			std::pair<size_t, size_t> range;
-			size_t mapPrev = 0;
-			size_t mapNext = 0;
+			size_t slotPrev = 0;
+			size_t slotNext = 0;
 			Point* prev = nullptr;
 			Point* next = nullptr;
 		};
@@ -798,8 +798,7 @@ namespace ascg {
 
 	private:
 		size_t fPeekSwap(Layer& layer) const {
-
-			// handle try-swap-backward
+			// fix: referencing into layers even if layers is still changing
 		}
 		void fSwapPoints(Point& prev, Point& next) const {
 			/* rotate the references to previous and upcoming points around */
@@ -812,93 +811,100 @@ namespace ascg {
 			if (next.next != nullptr)
 				next.next->prev = &prev;
 
-			/* update the mapping indices themselves */
-			if (prev.next != nullptr && next.next != nullptr)
-				std::swap(prev.mapNext, next.mapNext);
-			if (prev.prev != nullptr && next.prev != nullptr)
-				std::swap(prev.mapPrev, next.mapPrev);
+			/* check if the slot needs to be moved or can remain, as the points have been moved into the according slot */
+			if (prev.next == nullptr || next.next == nullptr)
+				(prev.next == nullptr ? prev : next).slotNext = (prev.next == nullptr ? next : prev).slotNext;
+			if (prev.prev == nullptr || next.prev == nullptr)
+				(prev.prev == nullptr ? prev : next).slotPrev = (prev.prev == nullptr ? next : prev).slotPrev;
 
 			/* swap the points themselves */
-			std::swap(prev, next);
+			std::swap(prev.range, next.range);
+			std::swap(prev.prev, next.prev);
+			std::swap(prev.next, next.next);
 		}
-		void fSwapUpcoming(std::vector<Layer>& layers, size_t index) const {
-			/* check if any crossings need to be fixed */
-			Layer& layer = layers[index];
-			if (layer.crossings == 0)
-				return;
-
-			/* iterate over all points and try to swap any positive crossings with the last non-postivie crossing */
-			for (size_t thisIndex = 1; thisIndex < layer.points.size(); ++thisIndex) {
-				if (layer.points[thisIndex].prev == nullptr)
+		void fPatchLayer(Layer& layer) const {
+			/* iterate over all points and try to swap any neighboring points, which cross to the previous layer */
+			for (size_t i = 1; i < layer.points.size(); ++i) {
+				if (layer.points[i].prev == nullptr)
 					continue;
 
-				/* loop until the crossing is not positive anymore */
+				/* loop until the current point cannot be swapped with the previous point */
+				size_t nextIndex = i;
 				while (true) {
-					/* check if this is a positive edge, or if the next edge needs to be inspected (null-crossings can be ignored) */
-					Point& next = layer.points[thisIndex];
-					if (next.prev->mapNext >= next.mapPrev)
-						break;
+					if (layer.crossings == 0)
+						return;
+					Point& next = layer.points[nextIndex];
 
-					/* find the last relevant node (must exist, as a positive crossing implies it
-					*	skipped something over, they must also be neighbors on this layers mapping) */
-					size_t prevIndex = thisIndex - 1;
-					while (layer.points[prevIndex].prev == nullptr)
+					/* find the last relevant point, which crosses the current point */
+					if (next.slotPrev == 0)
+						break;
+					size_t prevIndex = nextIndex - 1;
+					while (layer.points[prevIndex].prev == nullptr || layer.points[prevIndex].slotPrev == next.slotPrev)
 						--prevIndex;
 					Point& prev = layer.points[prevIndex];
 
-					/* check if the previous entry is a positive, in which case nothing can be done (null mappings
-					*	are possible, as this implies, that the positive edge must at least cross the null-edge) */
-					if (prev.prev->mapNext < prev.mapPrev)
-						break;
-					bool thisNode = (thisIndex >= layer.node.first && thisIndex < layer.node.first + layer.node.second);
+					/* check if either both, or neither, belonged to the node, in which case they can just be swapped directly */
+					bool nextNode = (nextIndex >= layer.node.first && nextIndex < layer.node.first + layer.node.second);
 					bool prevNode = (prevIndex >= layer.node.first && prevIndex < layer.node.first + layer.node.second);
+					if (nextNode == prevNode) {
+						/* check if the points cross and can be swapped */
+						if (prev.prev->slotNext <= next.prev->slotNext)
+							break;
 
-					/* check if either both, or neither, belonged to the node, in which case they can
-					*	just be swapped, and the positive can be re-used to be potentially swapped again
-					*	(cannot induce crossings in upcoming layers, as they have not yet been mapped) */
-					if (thisNode == prevNode) {
-						fSwapPoints(prev, next);
-						--layer.crossings, thisIndex = prevIndex;
+						/* cycle all points through and restart the procedure from the previous point */
+						for (size_t j = prevIndex; j < nextIndex; ++j)
+							fSwapPoints(layer.points[j], layer.points[j + 1]);
+						--layer.crossings, nextIndex = prevIndex;
 						continue;
 					}
 
-					/* count the total number of points part of this node and the number of points, which
-					*	are mapped before the previous points mapping (relevant to determine its costs) */
-					size_t mappedBeforePrev = 0, nodeMapped = 0;
+					/* count the number of points part of the node, which are mapped before and after
+					*	the single point, as a swap of the node would also swap all of these around */
+					size_t otherPoint = (nextNode ? prev : next).prev->slotNext, mappedBefore = 0, mappedAfter = 0;
 					for (size_t j = layer.node.first; j < layer.node.first + layer.node.second; ++j) {
 						if (layer.points[j].prev == nullptr)
 							continue;
-						++nodeMapped;
-						if (layer.points[j].prev->mapNext < prev.prev->mapNext)
-							++mappedBeforePrev;
+						if (layer.points[j].prev->slotNext < otherPoint)
+							++mappedBefore;
+						else if (layer.points[j].prev->slotNext > otherPoint)
+							++mappedAfter;
 					}
 
-					/* check if the current point belongs to the node, in which case, in which case a swap would result
-					*	in all points, which also belong to the node, which are mapped before the previous point on the
-					*	previous layer, to reduce the crossings, and all other nodes to increase the crossings */
-					if (thisNode) {
-						if (mappedBeforePrev <= nodeMapped - mappedBeforePrev)
+					/* handle the swap according to the direction of the node movement */
+					if (nextNode) {
+						/* check if the swap would reduce the overall number of crossings */
+						if (mappedBefore <= mappedAfter)
 							break;
+
+						/* patch the slot indices the node, as they will be preserved by the point-swaps, and the swaps
+						*	would only leave the first point of the node correct, but the remaining in the upper slot */
+						for (size_t j = layer.node.first + 1; j < layer.node.first + layer.node.second; ++j)
+							--layer.points[j].slotPrev;
 
 						/* rotate the previous point to be placed after all points of the node and
 						*	reset the index to repeat the process on the point at the new front */
 						for (size_t j = prevIndex + 1; j < layer.node.first + layer.node.second; ++j)
 							fSwapPoints(layer.points[j - 1], layer.points[j]);
-						layer.crossings -= (2 * mappedBeforePrev - nodeMapped);
-						--layer.node.first, thisIndex = prevIndex;
+						layer.crossings -= (mappedBefore - mappedAfter);
+						--layer.node.first, nextIndex = prevIndex;
 						continue;
 					}
 
-					/* if the previous point is part of the node, the same rules apply, as the other way around, but rotated */
-					if (mappedBeforePrev >= nodeMapped - mappedBeforePrev)
+					/* check if the swap would reduce the overall number of crossings */
+					if (mappedBefore >= mappedAfter)
 						break;
 
-					/* rotate the current point to lie before all points of the node
+					/* patch the slot indices of the node, as they will be preserved by the point-swaps, and the swaps
+					*	would only leave the last point of the node correct, but the remaining in the lower slot */
+					for (size_t j = layer.node.first + 1; j < layer.node.first + layer.node.second; ++j)
+						++layer.points[j].slotPrev;
+
+					/* rotate the next point to lie before all points of the node
 					*	and reset the index accordingly to try to restart the process */
-					for (size_t j = thisIndex; j > layer.node.first; --j)
+					for (size_t j = nextIndex; j > layer.node.first; --j)
 						fSwapPoints(layer.points[j - 1], layer.points[j]);
-					layer.crossings -= (nodeMapped - 2 * mappedBeforePrev);
-					thisIndex = layer.node.first++;
+					layer.crossings -= (mappedAfter - mappedBefore);
+					nextIndex = layer.node.first++;
 				}
 			}
 		}
@@ -933,8 +939,8 @@ namespace ascg {
 				}
 				Layer& layer = layers.back();
 
-				/* sort the ranges in the layer to ensure ranges, which belong to this layer
-				*	(i.e. start/end at this layer), are neighbors (must at least be one) */
+				/* sort the ranges in the layer to ensure ranges, which belong to this layer (i.e. start/end at
+				*	this layer), are neighbors (must at least be one), and setup the node range accordingly */
 				layer.node = { 0, 0 };
 				for (size_t i = 0; i < layer.points.size(); ++i) {
 					if (layer.points[i].range.first != layer.index && layer.points[i].range.second != layer.index)
@@ -944,50 +950,48 @@ namespace ascg {
 					++layer.node.second;
 				}
 
-				/* iterate over the ranges again (after sorting, as this rotates the ranges around)
-				*	and setup the previous layer indices and upcoming map and count the crossings */
-				std::map<std::pair<size_t, size_t>, size_t> upcoming;
-				size_t nextMapPrev = 0, nextMapNext = 0;
+				/* iterate over the ranges again (after sorting, as this rotates the ranges
+				*	around) and setup the mappings and references to the previous layer */
+				size_t nextSlotPrev = 0;
 				for (size_t i = 0; i < layer.points.size(); ++i) {
+					/* check if this range is part of the previous layer */
 					Point& point = layer.points[i];
-
-					/* check if this range will be part of the upcoming layer */
-					if (point.range.second > layer.index) {
-						point.mapNext = nextMapNext++;
-						upcoming.insert({ point.range, i });
-					}
-
-					/* check if this range is part of the previous layer and link the points
-					*	together (references are stable, as the lists have already been populated
-					*	with all points, and will not be reallocated anymore, just moved) */
 					if (point.range.first >= layer.index)
 						continue;
+
+					/* link the points together (references are stable, as the lists have already been
+					*	populated with all points, and will not be reallocated anymore, just moved) */
 					point.prev = &layers[layers.size() - 2].points[previous.find(point.range)->second];
-					point.mapPrev = nextMapPrev++;
+					point.slotPrev = (i < layer.node.second ? 0 : ++nextSlotPrev);
 					point.prev->next = &layer.points[i];
 
-					/* for negative crossings, every crossed connection is a crossing */
-					if (point.mapPrev < point.prev->mapNext)
-						layer.crossings += (point.prev->mapNext - point.mapPrev);
-
-					/* for positive crossings, every non-negative mapping, which starts after the
-					*	current point and ends before the current point results in a crossing */
-					else for (size_t j = i; j > 0; --j) {
-						const Point& prev = layer.points[j - 1];
-						if (prev.prev == nullptr)
-							continue;
-						if (prev.mapPrev <= point.prev->mapNext)
-							break;
-						if (prev.prev->mapNext <= prev.mapPrev && prev.prev->mapNext > point.prev->mapNext && prev.mapPrev < point.mapPrev)
+					/* update the crossing count by checking if this mapping crosses any previous mappings */
+					if (i >= layer.node.second) for (size_t j = 0; j < i; ++j) {
+						if (layer.points[j].prev != nullptr && layer.points[j].prev->slotNext > point.prev->slotNext)
 							++layer.crossings;
 					}
 				}
 
-				/* try to reduce the forward crossing count */
-				fSwapUpcoming(layers, layers.size() - 1);
-
-				/* update the new previous map and the total crossing count */
+				/* try to reduce the initial crossing count for the upcoming layer and update the total count */
+				fPatchLayer(layer);
 				crossings += layer.crossings;
+
+				/* iterate over the ranges again (after the initial patch, as this rotates
+				*	the ranges around) and setup the initial mapping for the upcoming layer */
+				std::map<std::pair<size_t, size_t>, size_t> upcoming;
+				size_t nextSlotNext = 0;
+				for (size_t i = 0; i < layer.points.size(); ++i) {
+					/* check if this range will be part of the upcoming layer */
+					Point& point = layer.points[i];
+					if (point.range.second <= layer.index)
+						continue;
+
+					/* allocate the slot index and add it to the upcoming mapping (node is not necessarily at slot 0 anymore) */
+					point.slotNext = nextSlotNext;
+					if (i < layer.node.first || i + 1 >= layer.node.first + layer.node.second)
+						++nextSlotNext;
+					upcoming.insert({ point.range, i });
+				}
 				previous = std::move(upcoming);
 
 				/* iterate over the current layer and setup the
