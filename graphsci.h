@@ -780,20 +780,18 @@ namespace ascg {
 				return (a.second < b.second);
 			}
 		};
-
-	private:
 		struct Point {
-			std::pair<size_t, size_t> range;
+			size_t range = 0;
 			Point* prev = nullptr;
 			Point* next = nullptr;
 			bool node = false;
 		};
 		struct Layer {
 			std::vector<Point> points;
-			size_t crossings = 0;
+			size_t* nextCrossings = nullptr;
+			size_t prevCrossings = 0;
 			size_t index = 0;
 		};
-
 		struct ForwardPatch {
 			int8_t order(const Point& a, const Point& b) const {
 				if (a.prev->node && b.prev->node)
@@ -803,13 +801,42 @@ namespace ascg {
 			bool mapped(const Point& pt) const {
 				return (pt.prev != nullptr);
 			}
+			size_t crossings(const Layer& l) const {
+				return l.prevCrossings;
+			}
+		};
+		struct BackwardPatch {
+			int8_t order(const Point& a, const Point& b) const {
+				if (a.next->node && b.next->node)
+					return 0;
+				return ((a.next < b.next) ? -1 : 1);
+			}
+			bool mapped(const Point& pt) const {
+				return (pt.next != nullptr);
+			}
+			size_t crossings(const Layer& l) const {
+				return (l.nextCrossings == nullptr ? 0 : *l.nextCrossings);
+			}
 		};
 
 	private:
-		size_t fPeekSwap(Layer& layer) const {
-			// fix: referencing into layers even if layers is still changing
-		}
-		void fSwapPoints(Point& prev, Point& next) const {
+		void fSwapPoints(Point& prev, Point& next, Layer& layer) const {
+			/* update the previous and next crossing count */
+			if (!prev.node || !next.node) {
+				if (prev.prev != nullptr && next.prev != nullptr && (!prev.prev->node || !next.prev->node)) {
+					if (prev.prev < next.prev)
+						++layer.prevCrossings;
+					else
+						--layer.prevCrossings;
+				}
+				if (layer.nextCrossings != nullptr && prev.next != nullptr && next.next != nullptr && (!prev.next->node || !next.next->node)) {
+					if (prev.next < next.next)
+						++(*layer.nextCrossings);
+					else
+						--(*layer.nextCrossings);
+				}
+			}
+
 			/* rotate the references to previous and upcoming points around */
 			if (prev.prev != nullptr)
 				prev.prev->next = &next;
@@ -826,7 +853,6 @@ namespace ascg {
 			std::swap(prev.next, next.next);
 			std::swap(prev.node, next.node);
 		}
-
 		template <class MapType>
 		void fPatchLayer(Layer& layer) const {
 			MapType map{};
@@ -839,7 +865,7 @@ namespace ascg {
 				/* loop until the current point cannot be swapped with the previous point */
 				size_t nextIndex = i;
 				while (true) {
-					if (layer.crossings == 0)
+					if (map.crossings(layer) == 0)
 						return;
 					Point& next = layer.points[nextIndex];
 
@@ -859,8 +885,8 @@ namespace ascg {
 
 						/* cycle all points through and restart the procedure from the previous point */
 						for (size_t j = prevIndex; j < nextIndex; ++j)
-							fSwapPoints(layer.points[j], layer.points[j + 1]);
-						--layer.crossings, nextIndex = prevIndex;
+							fSwapPoints(layer.points[j], layer.points[j + 1], layer);
+						nextIndex = prevIndex;
 						continue;
 					}
 
@@ -885,8 +911,7 @@ namespace ascg {
 						/* rotate the previous point to be placed after all points of the node and
 						*	reset the index to repeat the process on the point at the new front */
 						for (size_t j = prevIndex + 1; j < endIndex; ++j)
-							fSwapPoints(layer.points[j - 1], layer.points[j]);
-						layer.crossings -= (mappedBefore - mappedAfter);
+							fSwapPoints(layer.points[j - 1], layer.points[j], layer);
 						nextIndex = prevIndex;
 						continue;
 					}
@@ -909,8 +934,7 @@ namespace ascg {
 					/* rotate the next point to lie before all points of the node
 					*	and reset the index accordingly to try to restart the process */
 					for (size_t j = nextIndex; j > firstIndex; --j)
-						fSwapPoints(layer.points[j - 1], layer.points[j]);
-					layer.crossings -= (mappedAfter - mappedBefore);
+						fSwapPoints(layer.points[j - 1], layer.points[j], layer);
 					nextIndex = firstIndex;
 				}
 			}
@@ -918,85 +942,39 @@ namespace ascg {
 
 	private:
 		void fFinalize() const {
-			/* setup the list of open ranges (sorted by their start) */
-			std::set<std::pair<size_t, size_t>, Sorted> open(pRanges.begin(), pRanges.end());
-			std::vector<Layer> layers;
-			size_t crossings = 0;
+			/* setup the map of all ranges to their indices (sorted by their start) */
+			std::map<std::pair<size_t, size_t>, size_t, Sorted> open;
+			for (size_t i = 0; i < pRanges.size(); ++i)
+				open.insert({ pRanges[i], i });
 
-			/* iterate over the open ranges until they and their endpoints have all been inserted into the layers,
-			*	and the crossing count has been computed (no need to map previous for the first layer, as the first
-			*	layer can only consist of a single node, in which case the ranges can be swapped arbitrarily) */
-			std::map<std::pair<size_t, size_t>, size_t> previous;
+			/* setup the overall layers and phantom points */
+			std::vector<Layer> layers;
 			while (true) {
 				/* insert all upcoming nodes, which need to be added to this layer */
 				if (!open.empty()) {
 					auto itNext = open.begin();
 
 					/* check if a new layer needs to be pushed */
-					if (layers.empty() || layers.back().index < itNext->first)
-						layers.push_back(Layer{ .index = itNext->first });
+					if (layers.empty() || layers.back().index < itNext->first.first)
+						layers.push_back(Layer{ .index = itNext->first.first });
 					Layer& layer = layers.back();
 
 					/* insert all ranges, which start before or at the current layer */
-					while (!open.empty() && itNext->first <= layer.index) {
-						layer.points.push_back({ .range = *itNext });
-						layer.index = std::min<size_t>(itNext->first, layer.index);
+					while (!open.empty() && itNext->first.first <= layer.index) {
+						layer.points.push_back({ .range = itNext->second });
+						layer.index = std::min<size_t>(itNext->first.first, layer.index);
 						itNext = open.erase(itNext);
 					}
 				}
 				Layer& layer = layers.back();
 
-				/* sort the ranges in the layer to ensure ranges, which belong to this layer (i.e. start/end at
-				*	this layer), are neighbors (must at least be one), and setup the point flags accordingly */
-				size_t belongCount = 0;
-				for (size_t i = 0; i < layer.points.size(); ++i) {
-					if (layer.points[i].range.first != layer.index && layer.points[i].range.second != layer.index)
-						continue;
-					if (belongCount != i)
-						std::swap(layer.points[i].range, layer.points[belongCount].range);
-					layer.points[belongCount++].node = true;
-				}
-
-				/* iterate over the ranges again (after sorting, as this rotates the ranges
-				*	around) and setup the mappings and references to the previous layer */
-				for (size_t i = 0; i < layer.points.size(); ++i) {
-					/* check if this range is part of the previous layer */
-					Point& point = layer.points[i];
-					if (point.range.first >= layer.index)
-						continue;
-
-					/* link the points together (references are stable, as the lists have already been
-					*	populated with all points, and will not be reallocated anymore, just moved) */
-					point.prev = &layers[layers.size() - 2].points[previous.find(point.range)->second];
-					point.prev->next = &layer.points[i];
-
-					/* update the crossing count by checking if this mapping crosses any previous mappings */
-					if (!point.node) for (size_t j = 0; j < i; ++j) {
-						Point* prev = layer.points[j].prev;
-						if (prev != nullptr && prev > point.prev && (!prev->node || !point.prev->node))
-							++layer.crossings;
-					}
-				}
-
-				/* try to reduce the initial crossing count for the upcoming layer and update the total count */
-				fPatchLayer<ForwardPatch>(layer);
-				crossings += layer.crossings;
-
-				/* iterate over the ranges again (after the initial patch, as this rotates
-				*	the ranges around) and setup the initial mapping for the upcoming layer */
-				previous.clear();
-				for (size_t i = 0; i < layer.points.size(); ++i) {
-					if (Point& point = layer.points[i]; point.range.second > layer.index)
-						previous.insert({ point.range, i });
-				}
-
 				/* iterate over the current layer and setup the extension of all open ranges into the next layer */
 				Layer next{ .index = std::numeric_limits<size_t>::max() };
 				for (const Point& point : layer.points) {
-					if (point.range.second <= layer.index)
+					if (pRanges[point.range].second <= layer.index)
 						continue;
 					next.points.push_back({ .range = point.range });
-					next.index = std::min<size_t>(next.index, point.range.second);
+					next.index = std::min<size_t>(next.index, pRanges[point.range].second);
 				}
 
 				/* check if new ranges have been found to be inserted
@@ -1007,11 +985,59 @@ namespace ascg {
 					break;
 			}
 
-			//for (size_t i = layers.size(); i > 0; --i) {
-			//	crossings -= layers[i - 1].crossings;
-			//	fPatchLayer<BackwardPatch>(layers[i - 1]);
-			//	crossings += layers[i - 1].crossings;
-			//}
+			/* iterate over the layers and link the points together (after
+			*	setting up all layers, as it creates references between layers) */
+			std::map<size_t, size_t> rangePrevious;
+			for (size_t i = 0; i < layers.size(); ++i) {
+				Layer& layer = layers[i];
+
+				/* link the crossings count up */
+				if (i > 0)
+					layers[i - 1].nextCrossings = &layer.prevCrossings;
+
+				/* sort the ranges in the layer to ensure ranges, which belong to this layer (i.e. start/end at
+				*	this layer), are neighbors (must at least be one), and setup the point flags accordingly */
+				size_t belongCount = 0;
+				for (size_t j = 0; j < layer.points.size(); ++j) {
+					if (pRanges[layer.points[j].range].first != layer.index && pRanges[layer.points[j].range].second != layer.index)
+						continue;
+					if (belongCount != j)
+						std::swap(layer.points[j].range, layer.points[belongCount].range);
+					layer.points[belongCount++].node = true;
+				}
+
+				/* iterate over the ranges again (after sorting, as this rotates the ranges
+				*	around) and setup the mappings and references to the previous layer */
+				for (size_t j = 0; j < layer.points.size(); ++j) {
+					/* check if this range is part of the previous layer */
+					Point& point = layer.points[j];
+					if (pRanges[point.range].first >= layer.index)
+						continue;
+
+					/* link the points together (references are stable, as the lists have already been
+					*	populated with all points, and will not be reallocated anymore, just moved) */
+					point.prev = &layers[i - 1].points[rangePrevious.find(point.range)->second];
+					point.prev->next = &layer.points[j];
+
+					/* update the crossing count by checking if this mapping crosses any previous mappings */
+					if (!point.node) for (size_t k = 0; k < j; ++k) {
+						Point* prev = layer.points[k].prev;
+						if (prev != nullptr && prev > point.prev && (!prev->node || !point.prev->node))
+							++layer.prevCrossings;
+					}
+				}
+
+				/* try to reduce the initial crossing count */
+				fPatchLayer<ForwardPatch>(layer);
+
+				/* iterate over the ranges again (after the initial patch, as this rotates
+				*	the ranges around) and setup the initial mapping for the upcoming layer */
+				rangePrevious.clear();
+				for (size_t j = 0; j < layer.points.size(); ++j) {
+					if (Point& point = layer.points[j]; pRanges[point.range].second > layer.index)
+						rangePrevious.insert({ point.range, j });
+				}
+			}
 
 			return;
 		}
