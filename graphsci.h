@@ -9,13 +9,15 @@
 #include <utility>
 #include <limits>
 #include <list>
+#include <variant>
+#include <optional>
 
 
 #include <ustring/ustring.h>
 
 namespace ascg {
 	namespace detail {
-		struct Node {
+		struct _Node {
 			size_t row = 0;
 			size_t in = 0;
 			size_t out = 0;
@@ -39,7 +41,7 @@ namespace ascg {
 	class Builder {
 	private:
 		std::vector<std::string> pRows;
-		std::vector<detail::Node> pNodes;
+		std::vector<detail::_Node> pNodes;
 		size_t pWidth = 0;
 		char pHalfIndexUp = 0;
 		char pHalfIndexDown = 0;
@@ -60,7 +62,7 @@ namespace ascg {
 		}
 		void fInsertRow(size_t index) {
 			/* translate all nodes accordingly */
-			for (detail::Node& node : pNodes) {
+			for (detail::_Node& node : pNodes) {
 				if (node.row >= index)
 					++node.row;
 			}
@@ -98,7 +100,7 @@ namespace ascg {
 			}
 
 			/* check if the node has already been added */
-			detail::Node& node = pNodes[index];
+			detail::_Node& node = pNodes[index];
 			if (node.added)
 				return;
 		}
@@ -110,7 +112,7 @@ namespace ascg {
 				pNodes.push_back({ .row = pRows.size(), .in = 0, .out = 0, .added = false });
 				pRows.emplace_back(pWidth, ' ');
 			}
-			detail::Node& node = pNodes[index];
+			detail::_Node& node = pNodes[index];
 
 			/* check if the node has already been added */
 			if (node.added)
@@ -634,17 +636,272 @@ namespace ascg {
 	}
 
 	namespace detail {
+		struct Endpoint {
+			size_t range = 0;
+			size_t other = 0;
+		};
+		struct Endpoints {
+		private:
+			union {
+				detail::Endpoint value{};
+				detail::Endpoint* list;
+			} pValue;
+			size_t pSize = 0;
+
+		private:
+			static constexpr size_t fCapacity(size_t size) {
+				size_t capacity = 2;
+				while (capacity < size)
+					capacity <<= 1;
+				return capacity;
+			}
+
+		public:
+			Endpoints() = default;
+			Endpoints(const detail::Endpoints& other) {
+				if ((pSize = other.pSize) <= 1)
+					pValue.value = other.pValue.value;
+				else {
+					pValue.list = new detail::Endpoint[fCapacity(pSize)];
+					std::copy(other.pValue.list, other.pValue.list + pSize, pValue.list);
+				}
+			}
+			Endpoints(detail::Endpoints&& other) noexcept {
+				if (other.pSize > 1)
+					std::swap(pValue.list, other.pValue.list);
+				else
+					std::swap(pValue.value, other.pValue.value);
+				std::swap(pSize, other.pSize);
+			}
+			detail::Endpoints& operator=(const detail::Endpoints& other) {
+				if (other.pSize <= 1) {
+					if (pSize > 1)
+						delete[] pValue.list;
+					pValue.value = other.pValue.value;
+				}
+				else {
+					size_t cOther = fCapacity(other.pSize);
+					if (pSize <= 1 || fCapacity(pSize) != cOther) {
+						if (pSize > 1)
+							delete[] pValue.list;
+						pValue.list = new detail::Endpoint[cOther];
+					}
+					std::copy(other.pValue.list, other.pValue.list + other.pSize, pValue.list);
+				}
+				pSize = other.pSize;
+			}
+			detail::Endpoints& operator=(detail::Endpoints&& other) noexcept {
+				if (other.pSize > 1)
+					std::swap(pValue.list, other.pValue.list);
+				else
+					std::swap(pValue.value, other.pValue.value);
+				std::swap(pSize, other.pSize);
+			}
+			~Endpoints() {
+				if (pSize > 1)
+					free(pValue.list);
+			}
+
+		public:
+			void push(detail::Endpoint value) {
+				if (pSize == 0) {
+					pValue.value = value;
+					++pSize;
+					return;
+				}
+
+				size_t cNext = fCapacity(pSize + 1);
+				if (pSize == 1 || fCapacity(pSize) != cNext) {
+					detail::Endpoint* list = new detail::Endpoint[cNext];
+					if (pSize > 1) {
+						std::copy(pValue.list, pValue.list + pSize, list);
+						delete[] pValue.list;
+					}
+					else
+						list[0] = pValue.value;
+					pValue.list = list;
+				}
+				pValue.list[pSize++] = value;
+			}
+			std::span<detail::Endpoint> span() {
+				if (pSize == 1)
+					return std::span<detail::Endpoint>{ &pValue.value, pSize };
+				return std::span<detail::Endpoint>{ pValue.list, pSize };
+			}
+			std::span<const detail::Endpoint> span() const {
+				if (pSize == 1)
+					return std::span<const detail::Endpoint>{ &pValue.value, pSize };
+				return std::span<const detail::Endpoint>{ pValue.list, pSize };
+			}
+		};
+		struct Traverse {
+			size_t range = 0;
+			size_t prev = 0;
+			size_t next = 0;
+		};
+		struct Node {
+			detail::Endpoints end{};
+			detail::Endpoints start{};
+		};
 		struct Point {
+			std::variant<detail::Traverse, detail::Node> body;
+			size_t bestIndex = 0;
+			detail::Node* isNode() {
+				return (std::holds_alternative<detail::Node>(body) ? &node() : nullptr);
+			}
+			detail::Traverse* isTraverse() {
+				return (std::holds_alternative<detail::Traverse>(body) ? &traverse() : nullptr);
+			}
+			detail::Traverse& traverse() {
+				return std::get<detail::Traverse>(body);
+			}
+			detail::Node& node() {
+				return std::get<detail::Node>(body);
+			}
+		};
+		struct Layer {
+			std::vector<detail::Point> points;
+			size_t index = 0;
+		};
+
+
+		class Builder {
+		private:
+			struct Opened {
+			public:
+				std::pair<size_t, size_t> range;
+				size_t origin = 0;
+
+			public:
+				bool operator<(const Opened& other) const {
+					if (range.first != other.range.first)
+						return (range.first < other.range.first);
+					if (range.second != other.range.second)
+						return (range.second < other.range.second);
+					return (origin < other.origin);
+				}
+			};
+
+		public:
+			Builder() = default;
+
+		private:
+			void fConstructLayers(const std::vector<std::pair<size_t, size_t>>& ranges, std::vector<detail::Layer>& layers) const {
+				if (ranges.empty())
+					return;
+
+				/* setup the map of all ranges to their indices (sorted by their start) */
+				std::set<Opened> open;
+				for (size_t i = 0; i < ranges.size(); ++i)
+					open.insert({ ranges[i], i });
+
+				/* setup the overall layers and nodes and traverse points */
+				std::optional<size_t> layerNext = open.begin()->range.first;
+				while (layerNext.has_value()) {
+					/* setup the next layer with the node at index 0 */
+					detail::Layer& layer = layers.emplace_back(detail::Layer{ .index = *layerNext });
+					layer.points.push_back(detail::Point{ .body = detail::Node{} });
+					layerNext = std::nullopt;
+
+					/* insert all ranges which start at the current layer and update the next layer index */
+					auto itNext = open.begin();
+					while (!open.empty() && itNext->range.first == layer.index) {
+						layer.points[0].node().start.push({ .range = itNext->origin });
+						if (!layerNext.has_value() || itNext->range.second < *layerNext)
+							layerNext = itNext->range.second;
+						itNext = open.erase(itNext);
+					}
+
+					/* check if the start of the next layer is lower than any end of the inserted ranges */
+					if (!open.empty() && (!layerNext.has_value() || itNext->range.first < *layerNext))
+						layerNext = itNext->range.first;
+
+					/* check if the previous layer exists in order to be linked up */
+					if (layers.size() <= 1)
+						continue;
+
+					/* helper to connect a range to the top layer and ensure proper linkage between the
+					*	layers and to ensure the next assumed layer respects all currently open endings */
+					const auto addRange = [&ranges, &layer, &layerNext](size_t range, size_t index) -> size_t {
+						if (ranges[range].second == layer.index) {
+							layer.points[0].node().end.push({ .range = range, .other = index });
+							return 0;
+						}
+						layer.points.push_back(detail::Point{ .body = detail::Traverse{.range = range, .prev = index } });
+						if (!layerNext.has_value() || ranges[range].second < *layerNext)
+							layerNext = ranges[range].second;
+						return layer.points.size() - 1;
+					};
+
+					/* iterate over the previous layer and extend it into the current layer */
+					auto& previous = layers[layers.size() - 2].points;
+					for (size_t i = 0; i < previous.size(); ++i) {
+						if (auto* traverse = previous[i].isTraverse(); traverse != nullptr)
+							traverse->next = addRange(traverse->range, i);
+						else for (detail::Endpoint& ep : previous[i].node().start.span())
+							ep.other = addRange(ep.range, i);
+					}
+				}
+			}
+			void fSwapPoints(size_t first, std::vector<detail::Layer>& layers, size_t index) const {
+				/* helper functions to patch the points in the neighboring layers and to move a single point */
+				const auto updatePrevPoint = [](detail::Point& point, size_t range, size_t to) {
+					if (detail::Traverse* traverse = point.isTraverse(); traverse != nullptr)
+						traverse->next = to;
+					else for (detail::Endpoint& ep : point.node().start.span()) {
+						if (ep.range != range) continue;
+						ep.other = to;
+						break;
+					}
+				};
+				const auto updateNextPoint = [](detail::Point& point, size_t range, size_t to) {
+					if (detail::Traverse* traverse = point.isTraverse(); traverse != nullptr)
+						traverse->prev = to;
+					else for (detail::Endpoint& ep : point.node().end.span()) {
+						if (ep.range != range) continue;
+						ep.other = to;
+						break;
+					}
+				};
+				const auto moveSinglePoint = [&layers, index, &updatePrevPoint, &updateNextPoint](detail::Point& point, size_t to) {
+					if (detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
+						updatePrevPoint(layers[index - 1].points[traverse->prev], traverse->range, to);
+						updateNextPoint(layers[index + 1].points[traverse->next], traverse->range, to);
+						return;
+					}
+					for (detail::Endpoint& ep : point.node().end.span())
+						updatePrevPoint(layers[index - 1].points[ep.other], ep.range, to);
+					for (detail::Endpoint& ep : point.node().start.span())
+						updateNextPoint(layers[index + 1].points[ep.other], ep.range, to);
+				};
+
+				/* swap the actual points by first patching the neighbors and then performing the actual swap */
+				detail::Layer& layer = layers[index];
+				moveSinglePoint(layer.points[first], first + 1);
+				moveSinglePoint(layer.points[first + 1], first);
+				std::swap(layer.points[first], layer.points[first + 1]);
+			}
+
+		public:
+			void build(const std::vector<std::pair<size_t, size_t>>& ranges, std::vector<detail::Layer>& layers) const {
+				layers.clear();
+				fConstructLayers(ranges, layers);
+			}
+		};
+
+
+
+		struct _Point {
 			size_t range = 0;
 			size_t bestRange = 0;
-			detail::Point* prev = nullptr;
-			detail::Point* next = nullptr;
+			detail::_Point* prev = nullptr;
+			detail::_Point* next = nullptr;
 			bool node = false;
 
 			size_t placed = 0;
 		};
-		struct Layer {
-			std::vector<detail::Point> points;
+		struct _Layer {
+			std::vector<detail::_Point> points;
 			size_t* nextCrossings = nullptr;
 			size_t prevCrossings = 0;
 			size_t index = 0;
@@ -669,28 +926,28 @@ namespace ascg {
 				}
 			};
 			struct ForwardPatch {
-				int8_t order(const detail::Point& a, const detail::Point& b) const {
+				int8_t order(const detail::_Point& a, const detail::_Point& b) const {
 					if (a.prev->node && b.prev->node)
 						return 0;
 					return ((a.prev < b.prev) ? -1 : 1);
 				}
-				bool mapped(const detail::Point& pt) const {
+				bool mapped(const detail::_Point& pt) const {
 					return (pt.prev != nullptr);
 				}
-				size_t crossings(const detail::Layer& l) const {
+				size_t crossings(const detail::_Layer& l) const {
 					return l.prevCrossings;
 				}
 			};
 			struct BackwardPatch {
-				int8_t order(const detail::Point& a, const detail::Point& b) const {
+				int8_t order(const detail::_Point& a, const detail::_Point& b) const {
 					if (a.next->node && b.next->node)
 						return 0;
 					return ((a.next < b.next) ? -1 : 1);
 				}
-				bool mapped(const detail::Point& pt) const {
+				bool mapped(const detail::_Point& pt) const {
 					return (pt.next != nullptr);
 				}
-				size_t crossings(const detail::Layer& l) const {
+				size_t crossings(const detail::_Layer& l) const {
 					return (l.nextCrossings == nullptr ? 0 : *l.nextCrossings);
 				}
 			};
@@ -724,7 +981,7 @@ namespace ascg {
 			LayerBuilder(std::vector<std::pair<size_t, size_t>>& ranges) : pRanges{ ranges } {}
 
 		private:
-			void fSwapPoints(detail::Point& prev, detail::Point& next, detail::Layer& layer) const {
+			void fSwapPoints(detail::_Point& prev, detail::_Point& next, detail::_Layer& layer) const {
 				/* update the previous and next crossing count */
 				if (!prev.node || !next.node) {
 					if (prev.prev != nullptr && next.prev != nullptr && (!prev.prev->node || !next.prev->node)) {
@@ -758,7 +1015,7 @@ namespace ascg {
 				std::swap(prev.node, next.node);
 			}
 			template <class MapType>
-			void fPatchLayer(detail::Layer& layer) const {
+			void fPatchLayer(detail::_Layer& layer) const {
 				MapType map{};
 
 				/* iterate over all points and try to swap any neighboring points, which cross to the previous layer */
@@ -771,7 +1028,7 @@ namespace ascg {
 					while (true) {
 						if (map.crossings(layer) == 0)
 							return;
-						detail::Point& next = layer.points[nextIndex];
+						detail::_Point& next = layer.points[nextIndex];
 
 						/* find the last relevant point, which could cross the current point */
 						size_t prevIndex = nextIndex;
@@ -779,7 +1036,7 @@ namespace ascg {
 							--prevIndex;
 						if (prevIndex == 0)
 							break;
-						detail::Point& prev = layer.points[--prevIndex];
+						detail::_Point& prev = layer.points[--prevIndex];
 
 						/* check if neither belong to the node, in which case they can just be swapped directly */
 						if (!next.node && !prev.node) {
@@ -843,7 +1100,7 @@ namespace ascg {
 					}
 				}
 			}
-			void fConstructLayers(std::vector<detail::Layer>& layers) const {
+			void fConstructLayers(std::vector<detail::_Layer>& layers) const {
 				/* setup the map of all ranges to their indices (sorted by their start) */
 				std::set<Opened> open;
 				for (size_t i = 0; i < pRanges.size(); ++i)
@@ -857,8 +1114,8 @@ namespace ascg {
 
 						/* check if a new layer needs to be pushed */
 						if (layers.empty() || layers.back().index < itNext->range.first)
-							layers.push_back(detail::Layer{ .index = itNext->range.first });
-						detail::Layer& layer = layers.back();
+							layers.push_back(detail::_Layer{ .index = itNext->range.first });
+						detail::_Layer& layer = layers.back();
 
 						/* insert all ranges, which start before or at the current layer */
 						while (!open.empty() && itNext->range.first <= layer.index) {
@@ -867,11 +1124,11 @@ namespace ascg {
 							itNext = open.erase(itNext);
 						}
 					}
-					detail::Layer& layer = layers.back();
+					detail::_Layer& layer = layers.back();
 
 					/* iterate over the current layer and setup the extension of all open ranges into the next layer */
-					detail::Layer next{ .index = std::numeric_limits<size_t>::max() };
-					for (const detail::Point& point : layer.points) {
+					detail::_Layer next{ .index = std::numeric_limits<size_t>::max() };
+					for (const detail::_Point& point : layer.points) {
 						if (pRanges[point.range].second <= layer.index)
 							continue;
 						next.points.push_back({ .range = point.range });
@@ -890,7 +1147,7 @@ namespace ascg {
 				*	setting up all layers, as it creates references between layers) */
 				std::map<size_t, size_t> rangePrevious;
 				for (size_t i = 0; i < layers.size(); ++i) {
-					detail::Layer& layer = layers[i];
+					detail::_Layer& layer = layers[i];
 
 					/* link the crossings count up */
 					if (i > 0)
@@ -911,7 +1168,7 @@ namespace ascg {
 					*	around) and setup the mappings and references to the previous layer */
 					for (size_t j = 0; j < layer.points.size(); ++j) {
 						/* check if this range is part of the previous layer */
-						detail::Point& point = layer.points[j];
+						detail::_Point& point = layer.points[j];
 						if (pRanges[point.range].first >= layer.index)
 							continue;
 
@@ -922,7 +1179,7 @@ namespace ascg {
 
 						/* update the crossing count by checking if this mapping crosses any previous mappings */
 						if (!point.node) for (size_t k = 0; k < j; ++k) {
-							detail::Point* prev = layer.points[k].prev;
+							detail::_Point* prev = layer.points[k].prev;
 							if (prev != nullptr && prev > point.prev && (!prev->node || !point.prev->node))
 								++layer.prevCrossings;
 						}
@@ -935,7 +1192,7 @@ namespace ascg {
 					*	the ranges around) and setup the initial mapping for the upcoming layer */
 					rangePrevious.clear();
 					for (size_t j = 0; j < layer.points.size(); ++j) {
-						if (detail::Point& point = layer.points[j]; pRanges[point.range].second > layer.index)
+						if (detail::_Point& point = layer.points[j]; pRanges[point.range].second > layer.index)
 							rangePrevious.insert({ point.range, j });
 					}
 				}
@@ -952,7 +1209,7 @@ namespace ascg {
 				}
 				return hash;
 			}
-			void fOptimizeLayers(std::vector<detail::Layer>& layers) const {
+			void fOptimizeLayers(std::vector<detail::_Layer>& layers) const {
 				std::map<LayoutIdentifier, LayoutState> states;
 				std::optional<size_t> bestCrossings = std::nullopt;
 				LayoutEdge* edgeTaken = nullptr;
@@ -964,17 +1221,17 @@ namespace ascg {
 					/* measure the current layout state by summing up the
 					*	crossings and creating the hash over all points */
 					LayoutIdentifier identifier{ .hash = HashInit, .crossings = 0 };
-					for (const detail::Layer& layer : layers) {
+					for (const detail::_Layer& layer : layers) {
 						identifier.crossings += layer.prevCrossings;
-						for (const detail::Point& point : layer.points)
+						for (const detail::_Point& point : layer.points)
 							identifier.hash = fHashJoin(identifier.hash, point.range);
 					}
 
 					/* check if a better result has been found and store it as the best match */
 					if (!bestCrossings.has_value() || identifier.crossings < *bestCrossings) {
 						bestCrossings = identifier.crossings;
-						for (detail::Layer& layer : layers) {
-							for (detail::Point& point : layer.points)
+						for (detail::_Layer& layer : layers) {
+							for (detail::_Point& point : layer.points)
 								point.bestRange = point.range;
 						}
 					}
@@ -1034,7 +1291,7 @@ namespace ascg {
 			}
 
 		public:
-			void build(std::vector<detail::Layer>& layers) {
+			void build(std::vector<detail::_Layer>& layers) {
 				layers.clear();
 				fConstructLayers(layers);
 				fOptimizeLayers(layers);
