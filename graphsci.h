@@ -689,6 +689,7 @@ namespace ascg {
 					std::copy(other.pValue.list, other.pValue.list + other.pSize, pValue.list);
 				}
 				pSize = other.pSize;
+				return *this;
 			}
 			detail::Endpoints& operator=(detail::Endpoints&& other) noexcept {
 				if (other.pSize > 1)
@@ -696,6 +697,7 @@ namespace ascg {
 				else
 					std::swap(pValue.value, other.pValue.value);
 				std::swap(pSize, other.pSize);
+				return *this;
 			}
 			~Endpoints() {
 				if (pSize > 1)
@@ -723,15 +725,20 @@ namespace ascg {
 				}
 				pValue.list[pSize++] = value;
 			}
-			std::span<detail::Endpoint> span() {
-				if (pSize == 1)
-					return std::span<detail::Endpoint>{ &pValue.value, pSize };
-				return std::span<detail::Endpoint>{ pValue.list, pSize };
+			const detail::Endpoint* begin() const {
+				return (pSize == 1 ? &pValue.value : pValue.list);
 			}
-			std::span<const detail::Endpoint> span() const {
-				if (pSize == 1)
-					return std::span<const detail::Endpoint>{ &pValue.value, pSize };
-				return std::span<const detail::Endpoint>{ pValue.list, pSize };
+			detail::Endpoint* begin() {
+				return (pSize == 1 ? &pValue.value : pValue.list);
+			}
+			const detail::Endpoint* end() const {
+				return (pSize == 1 ? &pValue.value : pValue.list) + pSize;
+			}
+			detail::Endpoint* end() {
+				return (pSize == 1 ? &pValue.value : pValue.list) + pSize;
+			}
+			size_t size() const {
+				return pSize;
 			}
 		};
 		struct Traverse {
@@ -745,7 +752,18 @@ namespace ascg {
 		};
 		struct Point {
 			std::variant<detail::Traverse, detail::Node> body;
-			size_t bestIndex = 0;
+			const detail::Node* isNode() const {
+				return (std::holds_alternative<detail::Node>(body) ? &node() : nullptr);
+			}
+			const detail::Traverse* isTraverse() const {
+				return (std::holds_alternative<detail::Traverse>(body) ? &traverse() : nullptr);
+			}
+			const detail::Traverse& traverse() const {
+				return std::get<detail::Traverse>(body);
+			}
+			const detail::Node& node() const {
+				return std::get<detail::Node>(body);
+			}
 			detail::Node* isNode() {
 				return (std::holds_alternative<detail::Node>(body) ? &node() : nullptr);
 			}
@@ -764,21 +782,27 @@ namespace ascg {
 			size_t index = 0;
 		};
 
-
 		class Builder {
 		private:
 			struct Opened {
-			public:
-				std::pair<size_t, size_t> range;
-				size_t origin = 0;
-
-			public:
+				size_t range = 0;
+				size_t start = 0;
+				size_t end = 0;
 				bool operator<(const Opened& other) const {
-					if (range.first != other.range.first)
-						return (range.first < other.range.first);
-					if (range.second != other.range.second)
-						return (range.second < other.range.second);
-					return (origin < other.origin);
+					if (start != other.start)
+						return (start < other.start);
+					if (end != other.end)
+						return (end < other.end);
+					return (range < other.range);
+				}
+			};
+			struct Preferred {
+				float average = 0.0f;
+				size_t index = 0;
+				bool operator<(const Preferred& other) const {
+					if (average != other.average)
+						return (average < other.average);
+					return (index < other.index);
 				}
 			};
 
@@ -793,10 +817,10 @@ namespace ascg {
 				/* setup the map of all ranges to their indices (sorted by their start) */
 				std::set<Opened> open;
 				for (size_t i = 0; i < ranges.size(); ++i)
-					open.insert({ ranges[i], i });
+					open.insert(Opened{ .range = i, .start = ranges[i].first, .end = ranges[i].second });
 
 				/* setup the overall layers and nodes and traverse points */
-				std::optional<size_t> layerNext = open.begin()->range.first;
+				std::optional<size_t> layerNext = open.begin()->start;
 				while (layerNext.has_value()) {
 					/* setup the next layer with the node at index 0 */
 					detail::Layer& layer = layers.emplace_back(detail::Layer{ .index = *layerNext });
@@ -805,16 +829,16 @@ namespace ascg {
 
 					/* insert all ranges which start at the current layer and update the next layer index */
 					auto itNext = open.begin();
-					while (!open.empty() && itNext->range.first == layer.index) {
-						layer.points[0].node().start.push({ .range = itNext->origin });
-						if (!layerNext.has_value() || itNext->range.second < *layerNext)
-							layerNext = itNext->range.second;
+					while (!open.empty() && itNext->start == layer.index) {
+						layer.points[0].node().start.push({ .range = itNext->range });
+						if (!layerNext.has_value() || itNext->end < *layerNext)
+							layerNext = itNext->end;
 						itNext = open.erase(itNext);
 					}
 
 					/* check if the start of the next layer is lower than any end of the inserted ranges */
-					if (!open.empty() && (!layerNext.has_value() || itNext->range.first < *layerNext))
-						layerNext = itNext->range.first;
+					if (!open.empty() && (!layerNext.has_value() || itNext->start < *layerNext))
+						layerNext = itNext->start;
 
 					/* check if the previous layer exists in order to be linked up */
 					if (layers.size() <= 1)
@@ -838,17 +862,17 @@ namespace ascg {
 					for (size_t i = 0; i < previous.size(); ++i) {
 						if (auto* traverse = previous[i].isTraverse(); traverse != nullptr)
 							traverse->next = addRange(traverse->range, i);
-						else for (detail::Endpoint& ep : previous[i].node().start.span())
+						else for (detail::Endpoint& ep : previous[i].node().start)
 							ep.other = addRange(ep.range, i);
 					}
 				}
 			}
-			void fSwapPoints(size_t first, std::vector<detail::Layer>& layers, size_t index) const {
-				/* helper functions to patch the points in the neighboring layers and to move a single point */
+			void fMovePoint(detail::Point& point, size_t to, std::vector<detail::Layer>& layers, size_t index) const {
+				/* helper functions to patch the points in the neighboring layers */
 				const auto updatePrevPoint = [](detail::Point& point, size_t range, size_t to) {
 					if (detail::Traverse* traverse = point.isTraverse(); traverse != nullptr)
 						traverse->next = to;
-					else for (detail::Endpoint& ep : point.node().start.span()) {
+					else for (detail::Endpoint& ep : point.node().start) {
 						if (ep.range != range) continue;
 						ep.other = to;
 						break;
@@ -857,38 +881,406 @@ namespace ascg {
 				const auto updateNextPoint = [](detail::Point& point, size_t range, size_t to) {
 					if (detail::Traverse* traverse = point.isTraverse(); traverse != nullptr)
 						traverse->prev = to;
-					else for (detail::Endpoint& ep : point.node().end.span()) {
+					else for (detail::Endpoint& ep : point.node().end) {
 						if (ep.range != range) continue;
 						ep.other = to;
 						break;
 					}
 				};
-				const auto moveSinglePoint = [&layers, index, &updatePrevPoint, &updateNextPoint](detail::Point& point, size_t to) {
-					if (detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
-						updatePrevPoint(layers[index - 1].points[traverse->prev], traverse->range, to);
-						updateNextPoint(layers[index + 1].points[traverse->next], traverse->range, to);
-						return;
-					}
-					for (detail::Endpoint& ep : point.node().end.span())
-						updatePrevPoint(layers[index - 1].points[ep.other], ep.range, to);
-					for (detail::Endpoint& ep : point.node().start.span())
-						updateNextPoint(layers[index + 1].points[ep.other], ep.range, to);
-				};
 
-				/* swap the actual points by first patching the neighbors and then performing the actual swap */
+				/* update the referenced points of the moved point */
+				if (detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
+					updatePrevPoint(layers[index - 1].points[traverse->prev], traverse->range, to);
+					updateNextPoint(layers[index + 1].points[traverse->next], traverse->range, to);
+					return;
+				}
+				for (detail::Endpoint& ep : point.node().end)
+					updatePrevPoint(layers[index - 1].points[ep.other], ep.range, to);
+				for (detail::Endpoint& ep : point.node().start)
+					updateNextPoint(layers[index + 1].points[ep.other], ep.range, to);
+			}
+			size_t fCountCrossings(std::vector<detail::Layer>& layers) const {
+				size_t count = 0;
+
+				for (size_t i = 1; i < layers.size(); ++i) {
+					const detail::Layer& layer = layers[i];
+
+					for (size_t j = 0; j < layer.points.size(); ++j) {
+						const detail::Point& point = layer.points[j];
+						const auto testAgainstPoint = [&point, &count](size_t index) -> void {
+							if (const detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
+								if (index < traverse->prev)
+									++count;
+								return;
+							}
+							for (const detail::Endpoint& ep : point.node().end) {
+								if (index < ep.other)
+									++count;
+							}
+						};
+
+						for (size_t k = j + 1; k < layer.points.size(); ++k) {
+							const detail::Point& other = layer.points[k];
+							if (const detail::Traverse* traverse = other.isTraverse(); traverse != nullptr)
+								testAgainstPoint(traverse->prev);
+							else for (const detail::Endpoint& ep : other.node().end)
+								testAgainstPoint(ep.other);
+						}
+					}
+				}
+				return count;
+			}
+			void fOptimizeLayer(std::vector<detail::Layer>& layers, size_t index) const {
+				std::set<Preferred> preferred;
 				detail::Layer& layer = layers[index];
-				moveSinglePoint(layer.points[first], first + 1);
-				moveSinglePoint(layer.points[first + 1], first);
-				std::swap(layer.points[first], layer.points[first + 1]);
+
+				/* calculate the average position of each point based on its connected neighbors,
+				*	and sort the points new by this given target position (barycenter method) */
+				bool changed = false;
+				for (size_t i = 0; i < layer.points.size(); ++i) {
+					float average = 0.0f;
+
+					const detail::Point& pt = layer.points[i];
+					if (const detail::Traverse* traverse = pt.isTraverse(); traverse != nullptr)
+						average = static_cast<float>(traverse->prev + traverse->next) / 2.0f;
+					else {
+						const detail::Node& node = pt.node();
+						for (const detail::Endpoint& ep : node.start)
+							average += static_cast<float>(ep.other);
+						for (const detail::Endpoint& ep : node.end)
+							average += static_cast<float>(ep.other);
+						average /= static_cast<float>(node.start.size() + node.end.size());
+					}
+
+					std::set<Preferred>::iterator it = preferred.insert(Preferred{ .average = average, .index = i }).first;
+					if (++it != preferred.end())
+						changed = true;
+				}
+				if (!changed)
+					return;
+
+				/* construct the new layer based on the new indices */
+				std::vector<detail::Point> oldPoints{ layer.points.size(), detail::Point{} };
+				std::swap(oldPoints, layer.points);
+				size_t next = 0;
+				for (auto it = preferred.begin(); it != preferred.end(); ++it) {
+					if (it->index != next)
+						fMovePoint(oldPoints[it->index], next, layers, index);
+					layer.points[next++] = std::move(oldPoints[it->index]);
+				}
 			}
 
 		public:
 			void build(const std::vector<std::pair<size_t, size_t>>& ranges, std::vector<detail::Layer>& layers) const {
 				layers.clear();
 				fConstructLayers(ranges, layers);
+				str::PrintLn("Crossings: ", fCountCrossings(layers));
+
+				if (layers.size() > 2) for (size_t j = 0; j < 8; ++j) {
+					for (size_t i = 1; i < layers.size(); ++i) {
+						fOptimizeLayer(layers, i);
+						str::PrintLn("Crossings: ", fCountCrossings(layers));
+					}
+
+					if (layers.size() < 3)
+						continue;
+
+					for (size_t i = layers.size() - 1; i > 0; --i) {
+						fOptimizeLayer(layers, i - 1);
+						str::PrintLn("Crossings: ", fCountCrossings(layers));
+					}
+				}
 			}
 		};
+		class Renderer {
+			static constexpr size_t PreferStraightLinesScore = 2;
+		private:
+			enum class EntryKind : uint8_t { empty, node, traverse };
+			struct Position {
+				detail::Endpoint start;
+				detail::Endpoint end;
+				EntryKind kind = EntryKind::empty;
+				bool hasStart = false;
+				bool hasEnd = false;
+			};
+			using Row = std::vector<Position>;
 
+		public:
+			Renderer() = default;
+
+		private:
+			void fConstructGrid(const std::vector<detail::Layer>& layers, std::vector<Row>& grid) const {
+				size_t width = 0;
+
+				/* compute the width of the entire graph */
+				for (const detail::Layer& layer : layers) {
+					size_t tWidth = 0;
+					for (const detail::Point& pt : layer.points) {
+						if (pt.isTraverse() != nullptr)
+							++tWidth;
+						else
+							tWidth += std::max<size_t>(pt.node().start.size(), pt.node().end.size());
+					}
+					width = std::max<size_t>(width, tWidth);
+				}
+
+				/* construct the initial grid of plainly placed rows */
+				std::map<size_t, size_t> map;
+				for (const detail::Layer& layer : layers) {
+					Row& row = grid.emplace_back(width, Position{});
+					size_t index = 0, inStart = 0, inEnd = 0;
+
+					/* helper to link up ranges to the previous row */
+					const auto linkRange = [&map, &grid](detail::Endpoint& ep, size_t index) -> void {
+						ep.other = map[ep.range];
+						grid[grid.size() - 2][ep.other].start.other = index;
+					};
+
+					/* iterate over the points and expand them and patch up the indices of the previous row */
+					std::map<size_t, size_t> tMap;
+					for (const detail::Point& point : layer.points) {
+						/* place all traversing ranges */
+						if (const detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
+							row[index].start.range = traverse->range;
+							row[index].hasStart = true;
+							row[index].end.range = traverse->range;
+							row[index].hasEnd = true;
+							row[index].kind = EntryKind::traverse;
+							linkRange(row[index].end, index);
+							tMap[traverse->range] = index++;
+							continue;
+						}
+
+						/* helper to collect the endpoint ranges and sort them by their
+						*	other side (the other-side ordering is preserved into the grid) */
+						const auto sortEndpoints = [](const detail::Endpoints& eps) -> std::vector<size_t> {
+							const detail::Endpoint* list = eps.begin();
+							std::vector<size_t> out;
+
+							/* initially collect the indices and sort on them */
+							out.reserve(eps.size());
+							for (size_t i = 0; i < eps.size(); ++i)
+								out.push_back(i);
+							std::sort(out.begin(), out.end(), [list](size_t f, size_t s) -> bool {
+								return ((list[f].other != list[s].other) ? (list[f].other < list[s].other) : (f < s));
+							});
+
+							/* convert the indices back to the actual ranges */
+							for (size_t& val : out)
+								val = list[val].range;
+							return out;
+						};
+
+						/* place all starting ranges sorted by their other side */
+						const detail::Node& node = point.node();
+						for (size_t range : sortEndpoints(node.start)) {
+							row[index + inStart].start.range = range;
+							row[index + inStart].hasStart = true;
+							row[index + inStart].kind = EntryKind::node;
+							tMap[range] = index + inStart++;
+						}
+
+						/* place all ending ranges sorted by their other side */
+						for (size_t range : sortEndpoints(node.end)) {
+							row[index + inEnd].end.range = range;
+							row[index + inEnd].hasEnd = true;
+							row[index + inEnd].kind = EntryKind::node;
+							linkRange(row[index + inEnd].end, index + inEnd);
+							++inEnd;
+						}
+						index += std::max<size_t>(inStart, inEnd);
+					}
+					map = std::move(tMap);
+				}
+			}
+			void fMoveStart(std::vector<Row>& grid, size_t index, size_t from, size_t to) const {
+				Position& pos = grid[index][from];
+
+				/* move the neighbor references themselves and patch the endpoints (other is expected to be empty) */
+				if (pos.hasStart)
+					grid[index + 1][pos.start.other].end.other = to;
+				std::swap(grid[index][to].start, pos.start);
+				std::swap(grid[index][to].hasStart, pos.hasStart);
+			}
+			void fMoveEnd(std::vector<Row>& grid, size_t index, size_t from, size_t to) const {
+				Position& pos = grid[index][from];
+
+				/* move the neighbor references themselves and patch the endpoints (other is expected to be empty) */
+				if (pos.hasEnd)
+					grid[index - 1][pos.end.other].start.other = to;
+				std::swap(grid[index][to].end, pos.end);
+				std::swap(grid[index][to].hasEnd, pos.hasEnd);
+			}
+			void fMovePosition(std::vector<Row>& grid, size_t index, size_t from, size_t to) const {
+				fMoveStart(grid, index, from, to);
+				fMoveEnd(grid, index, from, to);
+
+				/* move the kind over (other is expected to be empty) */
+				std::swap(grid[index][to].kind, grid[index][from].kind);
+			}
+			void fLayoutRow(std::vector<Row>& grid, size_t index) const {
+				Row& row = grid[index];
+
+				/* helper to compute old and new score if the given position were to be moved */
+				const auto computeScore = [&row](size_t oldIndex, size_t nextIndex) -> std::pair<size_t, size_t> {
+					const auto distance = [](size_t s, size_t t) -> size_t { return (s < t ? (t - s) : (s - t)); };
+					const auto pow2 = [](size_t v) -> size_t { return v * v; };
+
+					size_t sOld = 0, eOld = 0, sNext = 0, eNext = 0;
+					if (row[oldIndex].hasStart) {
+						sOld += pow2(distance(oldIndex, row[oldIndex].start.other));
+						sNext += pow2(distance(nextIndex, row[oldIndex].start.other));
+						if (sOld == 0 || sNext == 0)
+							(sOld == 0 ? sNext : sOld) += PreferStraightLinesScore;
+					}
+					if (row[oldIndex].hasEnd) {
+						eOld += pow2(distance(oldIndex, row[oldIndex].end.other));
+						eNext += pow2(distance(nextIndex, row[oldIndex].end.other));
+						if (eOld == 0 || eNext == 0)
+							(eOld == 0 ? eNext : eOld) += PreferStraightLinesScore;
+					}
+					return { sOld + eOld, sNext + eNext };
+				};
+
+				/* helper to determine which endpoint to move into the node slot */
+				const auto computeNodeMove = [&row](const detail::Endpoint* lEp, const detail::Endpoint* rEp, size_t index) -> size_t {
+					size_t left = ((lEp != nullptr && lEp->other >= index) ? (lEp->other - (index - 1)) : 0);
+					size_t right = ((rEp != nullptr && rEp->other <= index) ? ((index + 1) - rEp->other) : 0);
+
+					/* check which side would benefit more from being moved into the empty spot */
+					if (left == 0 && right == 0)
+						return index;
+					if (left == right)
+						(index * 2 <= row.size() ? left : right) = 0;
+					return (left > right ? index - 1 : index + 1);
+				};
+
+				/* iterate until no more changes are applied to the row */
+				bool dirty = true;
+				while (dirty) {
+					dirty = false;
+
+					/* look for empty slots and check if it should be filled up from left or right */
+					size_t firstNode = row.size();
+					for (size_t i = 0; i < row.size(); ++i) {
+						Position& pos = row[i];
+
+						/* check if this is the first node index and otherwise check if its empty and can be consumed */
+						if (pos.kind != EntryKind::empty) {
+							if (pos.kind == EntryKind::node && firstNode >= row.size())
+								firstNode = i;
+							continue;
+						}
+						size_t bestDiff = 0, bestIndex = i;
+
+						/* iterate over the right and compute their score if they were to be moved one down */
+						size_t old = 0, next = 0;
+						for (size_t j = i + 1; j < row.size(); ++j) {
+							if (row[j].kind == EntryKind::empty) break;
+							const auto [_old, _next] = computeScore(j, j - 1);
+							old += _old, next += _next;
+
+							/* check if the new move would be even more effective
+							*	in reducing the score than the previous selection */
+							if (next < old && (bestDiff == 0 || old - next > bestDiff) && (row[j].kind != EntryKind::node || j + 1 >= row.size() || row[j + 1].kind != EntryKind::node))
+								bestDiff = (old - next), bestIndex = j;
+						}
+
+						/* iterate over the left and compute their score if they were to be moved one up */
+						old = 0, next = 0;
+						for (size_t j = i; j > 0; --j) {
+							if (row[j - 1].kind == EntryKind::empty) break;
+							const auto [_old, _next] = computeScore(j - 1, j);
+							old += _old, next += _next;
+
+							/* check if the new move would be even more effective
+							*	in reducing the score than the previous selection */
+							if (next < old && (bestDiff == 0 || old - next > bestDiff) && (row[j - 1].kind != EntryKind::node || j <= 1 || row[j - 2].kind != EntryKind::node))
+								bestDiff = (old - next), bestIndex = j - 1;
+						}
+
+						/* check if a move was selected to fill the next spot with */
+						if (bestDiff == 0)
+							continue;
+
+						/* rotate the new points into position */
+						if (bestIndex < i) for (size_t j = i; j > bestIndex; --j)
+							fMovePosition(grid, index, j - 1, j);
+						else for (size_t j = i + 1; j <= bestIndex; ++j)
+							fMovePosition(grid, index, j, j - 1);
+						dirty = true;
+						break;
+					}
+					if (dirty)
+						continue;
+
+					/* check if there is a vacant spot on the node, which can be filled by another
+					*	connection (no need to check any contiguous neighbors, as the node outputs are
+					*	sorted, hence if the neighbors profit from moving, so does the first entry) */
+					for (size_t i = firstNode; i < row.size() && row[i].kind == EntryKind::node; ++i) {
+						bool leftNode = (i > 0 && row[i - 1].kind == EntryKind::node);
+						bool rightNode = (i + 1 < row.size() && row[i + 1].kind == EntryKind::node);
+						if (!leftNode && !rightNode)
+							continue;
+						Position& pos = row[i];
+
+						/* check if the start is vacant and check if neigbors would benefit from being placed here */
+						if (!pos.hasStart) {
+							detail::Endpoint* lEp = (leftNode && row[i - 1].hasStart ? &row[i - 1].start : nullptr);
+							detail::Endpoint* rEp = (rightNode && row[i + 1].hasStart ? &row[i + 1].start : nullptr);
+							if (size_t from = computeNodeMove(lEp, rEp, i); from != i) {
+								fMoveStart(grid, index, from, i);
+								dirty = true;
+							}
+						}
+
+						/* check if the end is vacant and check if neigbors would benefit from being placed here */
+						if (!pos.hasEnd) {
+							detail::Endpoint* lEp = (leftNode && row[i - 1].hasEnd ? &row[i - 1].end : nullptr);
+							detail::Endpoint* rEp = (rightNode && row[i + 1].hasEnd ? &row[i + 1].end : nullptr);
+							if (size_t from = computeNodeMove(lEp, rEp, i); from != i) {
+								fMoveEnd(grid, index, from, i);
+								dirty = true;
+							}
+						}
+
+						if (dirty)
+							break;
+					}
+				}
+			}
+
+		public:
+			void draw(const std::vector<detail::Layer>& layers) const {
+				std::vector<Row> grid;
+
+				fConstructGrid(layers, grid);
+
+				for (size_t i = 0; i < 8; ++i) {
+					for (size_t j = 0; j < grid.size(); ++j)
+						fLayoutRow(grid, j);
+					for (size_t j = grid.size(); j > 0; --j)
+						fLayoutRow(grid, j - 1);
+				}
+
+				for (size_t i = 0; i < grid.size(); ++i) {
+					const Row& row = grid[i];
+
+					std::string start = "", line = "", end = "";
+					for (size_t j = 0; j < row.size(); ++j) {
+						start.push_back(row[j].hasStart ? '\'' : ' ');
+						end.push_back(row[j].hasEnd ? ',' : ' ');
+						if (row[j].kind == EntryKind::node)
+							line.push_back('#');
+						else if (row[j].hasStart)
+							line.push_back(row[j].hasEnd ? '|' : '\'');
+						else
+							line.push_back(row[j].hasEnd ? ',' : ' ');
+					}
+					str::PrintLn(end, '\n', line, '\n', start);
+				}
+			}
+		};
 
 
 		struct _Point {
