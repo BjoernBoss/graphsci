@@ -855,7 +855,7 @@ namespace ascg {
 						if (!layerNext.has_value() || ranges[range].second < *layerNext)
 							layerNext = ranges[range].second;
 						return layer.points.size() - 1;
-					};
+						};
 
 					/* iterate over the previous layer and extend it into the current layer */
 					auto& previous = layers[layers.size() - 2].points;
@@ -877,7 +877,7 @@ namespace ascg {
 						ep.other = to;
 						break;
 					}
-				};
+					};
 				const auto updateNextPoint = [](detail::Point& point, size_t range, size_t to) {
 					if (detail::Traverse* traverse = point.isTraverse(); traverse != nullptr)
 						traverse->prev = to;
@@ -886,7 +886,7 @@ namespace ascg {
 						ep.other = to;
 						break;
 					}
-				};
+					};
 
 				/* update the referenced points of the moved point */
 				if (detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
@@ -917,7 +917,7 @@ namespace ascg {
 								if (index < ep.other)
 									++count;
 							}
-						};
+							};
 
 						for (size_t k = j + 1; k < layer.points.size(); ++k) {
 							const detail::Point& other = layer.points[k];
@@ -995,10 +995,11 @@ namespace ascg {
 		class Renderer {
 			static constexpr size_t PreferStraightLinesScore = 2;
 		private:
-			enum class EntryKind : uint8_t { empty, node, traverse };
+			enum class EntryKind : uint8_t { empty, node, traverse, blocked };
 			struct Position {
 				detail::Endpoint start;
 				detail::Endpoint end;
+				size_t ordering = 0;
 				EntryKind kind = EntryKind::empty;
 				bool hasStart = false;
 				bool hasEnd = false;
@@ -1012,42 +1013,34 @@ namespace ascg {
 			void fConstructGrid(const std::vector<detail::Layer>& layers, std::vector<Row>& grid) const {
 				size_t width = 0;
 
-				/* compute the width of the entire graph */
-				for (const detail::Layer& layer : layers) {
-					size_t tWidth = 0;
-					for (const detail::Point& pt : layer.points) {
-						if (pt.isTraverse() != nullptr)
-							++tWidth;
-						else
-							tWidth += std::max<size_t>(pt.node().start.size(), pt.node().end.size());
-					}
-					width = std::max<size_t>(width, tWidth);
-				}
-
 				/* construct the initial grid of plainly placed rows */
 				std::map<size_t, size_t> map;
 				for (const detail::Layer& layer : layers) {
-					Row& row = grid.emplace_back(width, Position{});
-					size_t index = 0, inStart = 0, inEnd = 0;
+					Row& row = grid.emplace_back();
+					row.reserve(width);
 
 					/* helper to link up ranges to the previous row */
 					const auto linkRange = [&map, &grid](detail::Endpoint& ep, size_t index) -> void {
 						ep.other = map[ep.range];
 						grid[grid.size() - 2][ep.other].start.other = index;
-					};
+						};
 
 					/* iterate over the points and expand them and patch up the indices of the previous row */
 					std::map<size_t, size_t> tMap;
 					for (const detail::Point& point : layer.points) {
 						/* place all traversing ranges */
 						if (const detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
-							row[index].start.range = traverse->range;
-							row[index].hasStart = true;
-							row[index].end.range = traverse->range;
-							row[index].hasEnd = true;
-							row[index].kind = EntryKind::traverse;
-							linkRange(row[index].end, index);
-							tMap[traverse->range] = index++;
+							size_t index = row.size();
+							Position& pos = row.emplace_back();
+
+							/* configure and link up the next position */
+							pos.start.range = traverse->range;
+							pos.hasStart = true;
+							pos.end.range = traverse->range;
+							pos.hasEnd = true;
+							pos.kind = EntryKind::traverse;
+							linkRange(pos.end, index);
+							tMap[traverse->range] = index;
 							continue;
 						}
 
@@ -1063,35 +1056,100 @@ namespace ascg {
 								out.push_back(i);
 							std::sort(out.begin(), out.end(), [list](size_t f, size_t s) -> bool {
 								return ((list[f].other != list[s].other) ? (list[f].other < list[s].other) : (f < s));
-							});
+								});
 
 							/* convert the indices back to the actual ranges */
 							for (size_t& val : out)
 								val = list[val].range;
 							return out;
-						};
+							};
 
 						/* place all starting ranges sorted by their other side */
 						const detail::Node& node = point.node();
+						size_t nodeIndex = row.size(), intoNode = 0;
 						for (size_t range : sortEndpoints(node.start)) {
-							row[index + inStart].start.range = range;
-							row[index + inStart].hasStart = true;
-							row[index + inStart].kind = EntryKind::node;
-							tMap[range] = index + inStart++;
+							Position& pos = row.emplace_back();
+
+							/* configure the next position's start */
+							pos.start.range = range;
+							pos.hasStart = true;
+							pos.kind = EntryKind::node;
+							tMap[range] = nodeIndex + intoNode++;
 						}
 
 						/* place all ending ranges sorted by their other side */
 						for (size_t range : sortEndpoints(node.end)) {
-							row[index + inEnd].end.range = range;
-							row[index + inEnd].hasEnd = true;
-							row[index + inEnd].kind = EntryKind::node;
-							linkRange(row[index + inEnd].end, index + inEnd);
-							++inEnd;
+							Position& pos = (nodeIndex < row.size() ? row[nodeIndex] : row.emplace_back());
+
+							/* configure the next position's end */
+							pos.end.range = range;
+							pos.hasEnd = true;
+							pos.kind = EntryKind::node;
+							linkRange(pos.end, nodeIndex++);
 						}
-						index += std::max<size_t>(inStart, inEnd);
 					}
 					map = std::move(tMap);
+
+					/* iterate over the row again and count the number of crossings */
+					std::vector<size_t> crossings(row.size(), 0);
+					size_t totalCrossings = 0;
+					for (size_t i = 1; i < row.size(); ++i) {
+						if (!row[i].hasEnd)
+							continue;
+						for (size_t j = 0; j < i; ++j) {
+							if (!row[j].hasEnd || row[j].end.other <= row[i].end.other)
+								continue;
+							++crossings[i]; ++crossings[j];
+							++totalCrossings;
+						}
+					}
+
+					/* iterate over the crossings and apply them largest to lowest */
+					size_t ordering = 0;
+					while (totalCrossings > 0) {
+						Row& prev = grid[grid.size() - 2];
+
+						/* look for the next crossing to resolve next, which crosses the largest number of other lines */
+						size_t next = 0;
+						for (size_t i = 1; i < crossings.size(); ++i)
+							next = (crossings[next] < crossings[i] ? i : next);
+
+						/* clear the crossings of the selected entry */
+						totalCrossings -= crossings[next];
+						crossings[next] = 0;
+						for (size_t i = 0; i < row.size(); ++i) {
+							if (!row[i].hasEnd) continue;
+							size_t iOther = row[i].end.other, nOther = row[next].end.other;
+							if ((i < next) ? iOther > nOther : iOther < nOther)
+								--crossings[i];
+						}
+
+						/* check if an empty block needs to be inserted */
+						if (row[row[next].end.other].kind != EntryKind::blocked) {
+							row.push_back(Position{});
+							for (size_t i = row.size() - 1; i > next; --i) {
+								fMoveEnd(grid, grid.size() - 1, i - 1, i);
+								std::swap(row[i - 1].kind, row[i].kind);
+							}
+							row[next].kind = EntryKind::blocked;
+						}
+						if (prev[next].kind != EntryKind::blocked) {
+							prev.push_back(Position{});
+							for (size_t i = prev.size() - 1; i > next; --i)
+								fMovePosition(grid, grid.size() - 2, i - 1, i);
+							prev[next].kind = EntryKind::blocked;
+							width = std::max<size_t>(width, prev.size());
+						}
+					}
+
+
+					/* update the expected min-width (to reduce the number of allocations per row) */
+					width = std::max<size_t>(width, row.size());
 				}
+
+				/* flood the entire grid to be rectangular */
+				for (Row& row : grid)
+					row.resize(width);
 			}
 			void fMoveStart(std::vector<Row>& grid, size_t index, size_t from, size_t to) const {
 				Position& pos = grid[index][from];
@@ -1140,7 +1198,7 @@ namespace ascg {
 							(eOld == 0 ? eNext : eOld) += PreferStraightLinesScore;
 					}
 					return { sOld + eOld, sNext + eNext };
-				};
+					};
 
 				/* helper to determine which endpoint to move into the node slot */
 				const auto computeNodeMove = [&row](const detail::Endpoint* lEp, const detail::Endpoint* rEp, size_t index) -> size_t {
@@ -1153,7 +1211,7 @@ namespace ascg {
 					if (left == right)
 						(index * 2 <= row.size() ? left : right) = 0;
 					return (left > right ? index - 1 : index + 1);
-				};
+					};
 
 				/* iterate until no more changes are applied to the row */
 				bool dirty = true;
@@ -1268,14 +1326,22 @@ namespace ascg {
 
 					std::string start = "", line = "", end = "";
 					for (size_t j = 0; j < row.size(); ++j) {
-						start.push_back(row[j].hasStart ? '\'' : ' ');
-						end.push_back(row[j].hasEnd ? ',' : ' ');
+						if (row[j].hasStart && row[j].start.other != j)
+							start.push_back((row[j].start.other < j) ? '<' : '>');
+						else
+							start.push_back(row[j].hasStart ? '\'' : ' ');
+
+						if (row[j].hasEnd && row[j].end.other != j)
+							end.push_back((row[j].end.other < j) ? '<' : '>');
+						else
+							end.push_back(row[j].hasEnd ? ',' : ' ');
+
 						if (row[j].kind == EntryKind::node)
 							line.push_back('#');
-						else if (row[j].hasStart)
-							line.push_back(row[j].hasEnd ? '|' : '\'');
+						else if (row[j].kind == EntryKind::blocked)
+							line.push_back('X');
 						else
-							line.push_back(row[j].hasEnd ? ',' : ' ');
+							line.push_back(row[j].kind == EntryKind::traverse ? '|' : ' ');
 					}
 					str::PrintLn(end, '\n', line, '\n', start);
 				}
