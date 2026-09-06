@@ -588,8 +588,8 @@ namespace ascg {
 		private:
 			enum class EntryKind : uint8_t { empty, node, traverse, blocked };
 			struct Position {
-				detail::Endpoint start;
-				detail::Endpoint end;
+				size_t start = 0;
+				size_t end = 0;
 				size_t ordering = 0;
 				EntryKind kind = EntryKind::empty;
 				bool hasStart = false;
@@ -601,20 +601,40 @@ namespace ascg {
 			Renderer() = default;
 
 		private:
-			void fConstructGrid(const std::vector<detail::Layer>& layers, std::vector<Row>& grid) const {
+			void fMoveStart(std::vector<Row>& grid, size_t index, size_t from, size_t to) const {
+				Position& pos = grid[index][from];
+
+				/* move the neighbor references themselves and patch the endpoints (other is expected to be empty) */
+				if (pos.hasStart)
+					grid[index + 1][pos.start].end = to;
+				std::swap(grid[index][to].start, pos.start);
+				std::swap(grid[index][to].hasStart, pos.hasStart);
+			}
+			void fMoveEnd(std::vector<Row>& grid, size_t index, size_t from, size_t to) const {
+				Position& pos = grid[index][from];
+
+				/* move the neighbor references themselves and patch the endpoints (other is expected to be empty) */
+				if (pos.hasEnd)
+					grid[index - 1][pos.end].start = to;
+				std::swap(grid[index][to].end, pos.end);
+				std::swap(grid[index][to].hasEnd, pos.hasEnd);
+			}
+			void fSwapPositions(std::vector<Row>& grid, size_t index, size_t from, size_t to) const {
+				fMoveStart(grid, index, from, to);
+				fMoveEnd(grid, index, from, to);
+
+				/* move the kind over (other is expected to be empty) */
+				std::swap(grid[index][to].kind, grid[index][from].kind);
+			}
+
+			void fConstructBasicGrid(const std::vector<detail::Layer>& layers, std::vector<Row>& grid) const {
+				std::map<size_t, size_t> map;
 				size_t width = 0;
 
 				/* construct the initial grid of plainly placed rows */
-				std::map<size_t, size_t> map;
 				for (const detail::Layer& layer : layers) {
 					Row& row = grid.emplace_back();
 					row.reserve(width);
-
-					/* helper to link up ranges to the previous row */
-					const auto linkRange = [&map, &grid](detail::Endpoint& ep, size_t index) -> void {
-						ep.other = map[ep.range];
-						grid[grid.size() - 2][ep.other].start.other = index;
-					};
 
 					/* iterate over the points and expand them and patch up the indices of the previous row */
 					std::map<size_t, size_t> tMap;
@@ -625,12 +645,11 @@ namespace ascg {
 							Position& pos = row.emplace_back();
 
 							/* configure and link up the next position */
-							pos.start.range = traverse->range;
 							pos.hasStart = true;
-							pos.end.range = traverse->range;
+							pos.end = map[traverse->range];
 							pos.hasEnd = true;
 							pos.kind = EntryKind::traverse;
-							linkRange(pos.end, index);
+							grid[grid.size() - 2][pos.end].start = index;
 							tMap[traverse->range] = index;
 							continue;
 						}
@@ -662,7 +681,6 @@ namespace ascg {
 							Position& pos = row.emplace_back();
 
 							/* configure the next position's start */
-							pos.start.range = range;
 							pos.hasStart = true;
 							pos.kind = EntryKind::node;
 							tMap[range] = nodeIndex + intoNode++;
@@ -673,99 +691,84 @@ namespace ascg {
 							Position& pos = (nodeIndex < row.size() ? row[nodeIndex] : row.emplace_back());
 
 							/* configure the next position's end */
-							pos.end.range = range;
+							pos.end = map[range];
 							pos.hasEnd = true;
 							pos.kind = EntryKind::node;
-							linkRange(pos.end, nodeIndex++);
+							grid[grid.size() - 2][pos.end].start = nodeIndex++;
 						}
 					}
 					map = std::move(tMap);
 
-					/* iterate over the row again and count the number of crossings */
-					std::vector<size_t> crossings(row.size(), 0);
-					size_t totalCrossings = 0;
-					for (size_t i = 1; i < row.size(); ++i) {
-						if (!row[i].hasEnd)
-							continue;
-						for (size_t j = 0; j < i; ++j) {
-							if (!row[j].hasEnd || row[j].end.other <= row[i].end.other)
-								continue;
-							++crossings[i]; ++crossings[j];
-							++totalCrossings;
-						}
-					}
-
-					/* iterate over the crossings and apply them largest to lowest */
-					size_t ordering = 0;
-					while (totalCrossings > 0) {
-						Row& prev = grid[grid.size() - 2];
-
-						/* look for the next crossing to resolve next, which crosses the largest number of other lines */
-						size_t next = 0;
-						for (size_t i = 1; i < crossings.size(); ++i)
-							next = (crossings[next] < crossings[i] ? i : next);
-
-						/* clear the crossings of the selected entry */
-						totalCrossings -= crossings[next];
-						crossings[next] = 0;
-						for (size_t i = 0; i < row.size(); ++i) {
-							if (!row[i].hasEnd) continue;
-							size_t iOther = row[i].end.other, nOther = row[next].end.other;
-							if ((i < next) ? iOther > nOther : iOther < nOther)
-								--crossings[i];
-						}
-
-						/* check if an empty block needs to be inserted */
-						if (row[row[next].end.other].kind != EntryKind::blocked) {
-							row.push_back(Position{});
-							for (size_t i = row.size() - 1; i > next; --i) {
-								fMoveEnd(grid, grid.size() - 1, i - 1, i);
-								std::swap(row[i - 1].kind, row[i].kind);
-							}
-							row[next].kind = EntryKind::blocked;
-						}
-						if (prev[next].kind != EntryKind::blocked) {
-							prev.push_back(Position{});
-							for (size_t i = prev.size() - 1; i > next; --i)
-								fMovePosition(grid, grid.size() - 2, i - 1, i);
-							prev[next].kind = EntryKind::blocked;
-							width = std::max<size_t>(width, prev.size());
-						}
-					}
-
-
 					/* update the expected min-width (to reduce the number of allocations per row) */
 					width = std::max<size_t>(width, row.size());
 				}
+			}
+			void fOrderCrossings(std::vector<Row>& grid, size_t index) const {
+				Row& row = grid[index];
+				std::vector<size_t> crossings(row.size(), 0);
+
+				/* iterate over the row and count the number of crossings between the current row and the previous row */
+				size_t totalCrossings = 0;
+				for (size_t i = 1; i < row.size(); ++i) {
+					if (!row[i].hasEnd)
+						continue;
+					for (size_t j = 0; j < i; ++j) {
+						if (!row[j].hasEnd || row[j].end <= row[i].end)
+							continue;
+						++crossings[i]; ++crossings[j];
+						++totalCrossings;
+					}
+				}
+				if (totalCrossings == 0)
+					return;
+				Row& prev = grid[index - 1];
+
+				/* iterate over the crossings and apply them largest to lowest */
+				size_t ordering = 0;
+				while (totalCrossings > 0) {
+					/* look for the next crossing to resolve next, which crosses the largest number of other lines */
+					size_t next = 0;
+					for (size_t i = 1; i < crossings.size(); ++i)
+						next = (crossings[next] < crossings[i] ? i : next);
+
+					/* clear the crossings of the selected entry */
+					totalCrossings -= crossings[next];
+					crossings[next] = 0;
+					for (size_t i = 0; i < row.size(); ++i) {
+						if (!row[i].hasEnd) continue;
+						size_t iOther = row[i].end, nOther = row[next].end;
+						if ((i < next) ? iOther > nOther : iOther < nOther)
+							--crossings[i];
+					}
+
+					/* check if an empty block needs to be inserted */
+					if (row[row[next].end].kind != EntryKind::blocked) {
+						row.push_back(Position{});
+						for (size_t i = row.size() - 1; i > next; --i)
+							fSwapPositions(grid, index, i - 1, i);
+						row[next].kind = EntryKind::blocked;
+					}
+					if (prev[next].kind != EntryKind::blocked) {
+						prev.push_back(Position{});
+						for (size_t i = prev.size() - 1; i > next; --i)
+							fSwapPositions(grid, index - 1, i - 1, i);
+						prev[next].kind = EntryKind::blocked;
+					}
+				}
+			}
+			void fConstructGrid(const std::vector<detail::Layer>& layers, std::vector<Row>& grid) const {
+				fConstructBasicGrid(layers, grid);
+
+				/* order the crossings and insert the necessary breaks */
+				for (size_t i = 0; i < grid.size(); ++i)
+					fOrderCrossings(grid, i);
 
 				/* flood the entire grid to be rectangular */
+				size_t width = 0;
+				for (size_t i = 0; i < grid.size(); ++i)
+					width = std::max<size_t>(width, grid[i].size());
 				for (Row& row : grid)
 					row.resize(width);
-			}
-			void fMoveStart(std::vector<Row>& grid, size_t index, size_t from, size_t to) const {
-				Position& pos = grid[index][from];
-
-				/* move the neighbor references themselves and patch the endpoints (other is expected to be empty) */
-				if (pos.hasStart)
-					grid[index + 1][pos.start.other].end.other = to;
-				std::swap(grid[index][to].start, pos.start);
-				std::swap(grid[index][to].hasStart, pos.hasStart);
-			}
-			void fMoveEnd(std::vector<Row>& grid, size_t index, size_t from, size_t to) const {
-				Position& pos = grid[index][from];
-
-				/* move the neighbor references themselves and patch the endpoints (other is expected to be empty) */
-				if (pos.hasEnd)
-					grid[index - 1][pos.end.other].start.other = to;
-				std::swap(grid[index][to].end, pos.end);
-				std::swap(grid[index][to].hasEnd, pos.hasEnd);
-			}
-			void fMovePosition(std::vector<Row>& grid, size_t index, size_t from, size_t to) const {
-				fMoveStart(grid, index, from, to);
-				fMoveEnd(grid, index, from, to);
-
-				/* move the kind over (other is expected to be empty) */
-				std::swap(grid[index][to].kind, grid[index][from].kind);
 			}
 			void fLayoutRow(std::vector<Row>& grid, size_t index) const {
 				Row& row = grid[index];
@@ -777,14 +780,14 @@ namespace ascg {
 
 					size_t sOld = 0, eOld = 0, sNext = 0, eNext = 0;
 					if (row[oldIndex].hasStart) {
-						sOld += pow2(distance(oldIndex, row[oldIndex].start.other));
-						sNext += pow2(distance(nextIndex, row[oldIndex].start.other));
+						sOld += pow2(distance(oldIndex, row[oldIndex].start));
+						sNext += pow2(distance(nextIndex, row[oldIndex].start));
 						if (sOld == 0 || sNext == 0)
 							(sOld == 0 ? sNext : sOld) += PreferStraightLinesScore;
 					}
 					if (row[oldIndex].hasEnd) {
-						eOld += pow2(distance(oldIndex, row[oldIndex].end.other));
-						eNext += pow2(distance(nextIndex, row[oldIndex].end.other));
+						eOld += pow2(distance(oldIndex, row[oldIndex].end));
+						eNext += pow2(distance(nextIndex, row[oldIndex].end));
 						if (eOld == 0 || eNext == 0)
 							(eOld == 0 ? eNext : eOld) += PreferStraightLinesScore;
 					}
@@ -792,9 +795,9 @@ namespace ascg {
 				};
 
 				/* helper to determine which endpoint to move into the node slot */
-				const auto computeNodeMove = [&row](const detail::Endpoint* lEp, const detail::Endpoint* rEp, size_t index) -> size_t {
-					size_t left = ((lEp != nullptr && lEp->other >= index) ? (lEp->other - (index - 1)) : 0);
-					size_t right = ((rEp != nullptr && rEp->other <= index) ? ((index + 1) - rEp->other) : 0);
+				const auto computeNodeMove = [&row](size_t* lOther, size_t* rOther, size_t index) -> size_t {
+					size_t left = ((lOther != nullptr && *lOther >= index) ? (*lOther - (index - 1)) : 0);
+					size_t right = ((rOther != nullptr && *rOther <= index) ? ((index + 1) - *rOther) : 0);
 
 					/* check which side would benefit more from being moved into the empty spot */
 					if (left == 0 && right == 0)
@@ -854,9 +857,9 @@ namespace ascg {
 
 						/* rotate the new points into position */
 						if (bestIndex < i) for (size_t j = i; j > bestIndex; --j)
-							fMovePosition(grid, index, j - 1, j);
+							fSwapPositions(grid, index, j - 1, j);
 						else for (size_t j = i + 1; j <= bestIndex; ++j)
-							fMovePosition(grid, index, j, j - 1);
+							fSwapPositions(grid, index, j, j - 1);
 						dirty = true;
 						break;
 					}
@@ -875,9 +878,9 @@ namespace ascg {
 
 						/* check if the start is vacant and check if neigbors would benefit from being placed here */
 						if (!pos.hasStart) {
-							detail::Endpoint* lEp = (leftNode && row[i - 1].hasStart ? &row[i - 1].start : nullptr);
-							detail::Endpoint* rEp = (rightNode && row[i + 1].hasStart ? &row[i + 1].start : nullptr);
-							if (size_t from = computeNodeMove(lEp, rEp, i); from != i) {
+							size_t* lOther = (leftNode && row[i - 1].hasStart ? &row[i - 1].start : nullptr);
+							size_t* rOther = (rightNode && row[i + 1].hasStart ? &row[i + 1].start : nullptr);
+							if (size_t from = computeNodeMove(lOther, rOther, i); from != i) {
 								fMoveStart(grid, index, from, i);
 								dirty = true;
 							}
@@ -885,9 +888,9 @@ namespace ascg {
 
 						/* check if the end is vacant and check if neigbors would benefit from being placed here */
 						if (!pos.hasEnd) {
-							detail::Endpoint* lEp = (leftNode && row[i - 1].hasEnd ? &row[i - 1].end : nullptr);
-							detail::Endpoint* rEp = (rightNode && row[i + 1].hasEnd ? &row[i + 1].end : nullptr);
-							if (size_t from = computeNodeMove(lEp, rEp, i); from != i) {
+							size_t* lOther = (leftNode && row[i - 1].hasEnd ? &row[i - 1].end : nullptr);
+							size_t* rOther = (rightNode && row[i + 1].hasEnd ? &row[i + 1].end : nullptr);
+							if (size_t from = computeNodeMove(lOther, rOther, i); from != i) {
 								fMoveEnd(grid, index, from, i);
 								dirty = true;
 							}
@@ -917,13 +920,13 @@ namespace ascg {
 
 					std::string start = "", line = "", end = "";
 					for (size_t j = 0; j < row.size(); ++j) {
-						if (row[j].hasStart && row[j].start.other != j)
-							start.push_back((row[j].start.other < j) ? '<' : '>');
+						if (row[j].hasStart && row[j].start != j)
+							start.push_back((row[j].start < j) ? '<' : '>');
 						else
 							start.push_back(row[j].hasStart ? '\'' : ' ');
 
-						if (row[j].hasEnd && row[j].end.other != j)
-							end.push_back((row[j].end.other < j) ? '<' : '>');
+						if (row[j].hasEnd && row[j].end != j)
+							end.push_back((row[j].end < j) ? '<' : '>');
 						else
 							end.push_back(row[j].hasEnd ? ',' : ' ');
 
@@ -941,7 +944,6 @@ namespace ascg {
 	}
 
 
-	/* remove 'range' index from Positions ? */
 	/* add self-loops?/double-edges?/remove 'std::pair'/add directions? */
 	/* make use of [pFirst], [pLast] */
 	class _Builder {
