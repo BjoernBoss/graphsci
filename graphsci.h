@@ -446,7 +446,7 @@ namespace ascg {
 						if (!layerNext.has_value() || ranges[range].second < *layerNext)
 							layerNext = ranges[range].second;
 						return layer.points.size() - 1;
-						};
+					};
 
 					/* iterate over the previous layer and extend it into the current layer */
 					auto& previous = layers[layers.size() - 2].points;
@@ -468,7 +468,7 @@ namespace ascg {
 						ep.other = to;
 						break;
 					}
-					};
+				};
 				const auto updateNextPoint = [](detail::Point& point, size_t range, size_t to) {
 					if (detail::Traverse* traverse = point.isTraverse(); traverse != nullptr)
 						traverse->prev = to;
@@ -477,7 +477,7 @@ namespace ascg {
 						ep.other = to;
 						break;
 					}
-					};
+				};
 
 				/* update the referenced points of the moved point */
 				if (detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
@@ -508,7 +508,7 @@ namespace ascg {
 								if (index < ep.other)
 									++count;
 							}
-							};
+						};
 
 						for (size_t k = j + 1; k < layer.points.size(); ++k) {
 							const detail::Point& other = layer.points[k];
@@ -614,7 +614,7 @@ namespace ascg {
 					const auto linkRange = [&map, &grid](detail::Endpoint& ep, size_t index) -> void {
 						ep.other = map[ep.range];
 						grid[grid.size() - 2][ep.other].start.other = index;
-						};
+					};
 
 					/* iterate over the points and expand them and patch up the indices of the previous row */
 					std::map<size_t, size_t> tMap;
@@ -647,13 +647,13 @@ namespace ascg {
 								out.push_back(i);
 							std::sort(out.begin(), out.end(), [list](size_t f, size_t s) -> bool {
 								return ((list[f].other != list[s].other) ? (list[f].other < list[s].other) : (f < s));
-								});
+							});
 
 							/* convert the indices back to the actual ranges */
 							for (size_t& val : out)
 								val = list[val].range;
 							return out;
-							};
+						};
 
 						/* place all starting ranges sorted by their other side */
 						const detail::Node& node = point.node();
@@ -789,7 +789,7 @@ namespace ascg {
 							(eOld == 0 ? eNext : eOld) += PreferStraightLinesScore;
 					}
 					return { sOld + eOld, sNext + eNext };
-					};
+				};
 
 				/* helper to determine which endpoint to move into the node slot */
 				const auto computeNodeMove = [&row](const detail::Endpoint* lEp, const detail::Endpoint* rEp, size_t index) -> size_t {
@@ -802,7 +802,7 @@ namespace ascg {
 					if (left == right)
 						(index * 2 <= row.size() ? left : right) = 0;
 					return (left > right ? index - 1 : index + 1);
-					};
+				};
 
 				/* iterate until no more changes are applied to the row */
 				bool dirty = true;
@@ -936,414 +936,6 @@ namespace ascg {
 					}
 					str::PrintLn(end, '\n', line, '\n', start);
 				}
-			}
-		};
-
-
-		struct _Point {
-			size_t range = 0;
-			size_t bestRange = 0;
-			detail::_Point* prev = nullptr;
-			detail::_Point* next = nullptr;
-			bool node = false;
-
-			size_t placed = 0;
-		};
-		struct _Layer {
-			std::vector<detail::_Point> points;
-			size_t* nextCrossings = nullptr;
-			size_t prevCrossings = 0;
-			size_t index = 0;
-
-			size_t width = 0;
-		};
-
-		class LayerBuilder {
-		private:
-			struct Opened {
-			public:
-				std::pair<size_t, size_t> range;
-				size_t origin = 0;
-
-			public:
-				bool operator<(const Opened& other) const {
-					if (range.first != other.range.first)
-						return (range.first < other.range.first);
-					if (range.second != other.range.second)
-						return (range.second < other.range.second);
-					return (origin < other.origin);
-				}
-			};
-			struct ForwardPatch {
-				int8_t order(const detail::_Point& a, const detail::_Point& b) const {
-					if (a.prev->node && b.prev->node)
-						return 0;
-					return ((a.prev < b.prev) ? -1 : 1);
-				}
-				bool mapped(const detail::_Point& pt) const {
-					return (pt.prev != nullptr);
-				}
-				size_t crossings(const detail::_Layer& l) const {
-					return l.prevCrossings;
-				}
-			};
-			struct BackwardPatch {
-				int8_t order(const detail::_Point& a, const detail::_Point& b) const {
-					if (a.next->node && b.next->node)
-						return 0;
-					return ((a.next < b.next) ? -1 : 1);
-				}
-				bool mapped(const detail::_Point& pt) const {
-					return (pt.next != nullptr);
-				}
-				size_t crossings(const detail::_Layer& l) const {
-					return (l.nextCrossings == nullptr ? 0 : *l.nextCrossings);
-				}
-			};
-			struct LayoutIdentifier {
-			public:
-				uint64_t hash = 0;
-				size_t crossings = 0;
-
-			public:
-				bool operator<(const LayoutIdentifier& other) const {
-					if (hash != other.hash)
-						return (hash < other.hash);
-					return (crossings < other.crossings);
-				}
-			};
-			struct LayoutEdge {
-				/* [index, forward] encodes the change to be performed for this edge */
-				size_t index = 0;
-				bool forward = false;
-				std::optional<LayoutIdentifier> target;
-			};
-			struct LayoutState {
-				std::vector<LayoutEdge> edges;
-				size_t stamp;
-			};
-
-		public:
-			const std::vector<std::pair<size_t, size_t>>& pRanges;
-
-		public:
-			LayerBuilder(std::vector<std::pair<size_t, size_t>>& ranges) : pRanges{ ranges } {}
-
-		private:
-			void fSwapPoints(detail::_Point& prev, detail::_Point& next, detail::_Layer& layer) const {
-				/* update the previous and next crossing count */
-				if (!prev.node || !next.node) {
-					if (prev.prev != nullptr && next.prev != nullptr && (!prev.prev->node || !next.prev->node)) {
-						if (prev.prev < next.prev)
-							++layer.prevCrossings;
-						else
-							--layer.prevCrossings;
-					}
-					if (layer.nextCrossings != nullptr && prev.next != nullptr && next.next != nullptr && (!prev.next->node || !next.next->node)) {
-						if (prev.next < next.next)
-							++(*layer.nextCrossings);
-						else
-							--(*layer.nextCrossings);
-					}
-				}
-
-				/* rotate the references to previous and upcoming points around */
-				if (prev.prev != nullptr)
-					prev.prev->next = &next;
-				if (prev.next != nullptr)
-					prev.next->prev = &next;
-				if (next.prev != nullptr)
-					next.prev->next = &prev;
-				if (next.next != nullptr)
-					next.next->prev = &prev;
-
-				/* swap the points themselves */
-				std::swap(prev.range, next.range);
-				std::swap(prev.prev, next.prev);
-				std::swap(prev.next, next.next);
-				std::swap(prev.node, next.node);
-			}
-			template <class MapType>
-			void fPatchLayer(detail::_Layer& layer) const {
-				MapType map{};
-
-				/* iterate over all points and try to swap any neighboring points, which cross to the previous layer */
-				for (size_t i = 1; i < layer.points.size(); ++i) {
-					if (!map.mapped(layer.points[i]))
-						continue;
-
-					/* loop until the current point cannot be swapped with the previous point */
-					size_t nextIndex = i;
-					while (true) {
-						if (map.crossings(layer) == 0)
-							return;
-						detail::_Point& next = layer.points[nextIndex];
-
-						/* find the last relevant point, which could cross the current point */
-						size_t prevIndex = nextIndex;
-						while (prevIndex > 0 && (!map.mapped(layer.points[prevIndex - 1]) || (next.node && layer.points[prevIndex - 1].node)))
-							--prevIndex;
-						if (prevIndex == 0)
-							break;
-						detail::_Point& prev = layer.points[--prevIndex];
-
-						/* check if neither belong to the node, in which case they can just be swapped directly */
-						if (!next.node && !prev.node) {
-							/* check if the points cross and can be swapped */
-							if (map.order(prev, next) <= 0)
-								break;
-
-							/* cycle all points through and restart the procedure from the previous point */
-							for (size_t j = prevIndex; j < nextIndex; ++j)
-								fSwapPoints(layer.points[j], layer.points[j + 1], layer);
-							nextIndex = prevIndex;
-							continue;
-						}
-
-						/* check if the next point is part of the node, in which case the previous point is not,
-						*	but would cross all points of the node (otherwise, the opposite direction holds) */
-						if (next.node) {
-							/* count the number of points of the node, which are mapped before and after the
-							*	single point and check if a swap would reduce the overall number of crossings */
-							size_t mappedBefore = 0, mappedAfter = 0, endIndex = nextIndex;
-							while (true) {
-								if (map.mapped(layer.points[endIndex])) {
-									if (int8_t res = map.order(prev, layer.points[endIndex]); res != 0)
-										++(res < 0 ? mappedAfter : mappedBefore);
-								}
-								++endIndex;
-								if (endIndex >= layer.points.size() || !layer.points[endIndex].node)
-									break;
-							}
-							if (mappedBefore <= mappedAfter)
-								break;
-
-							/* rotate the previous point to be placed after all points of the node and
-							*	reset the index to repeat the process on the point at the new front */
-							for (size_t j = prevIndex + 1; j < endIndex; ++j)
-								fSwapPoints(layer.points[j - 1], layer.points[j], layer);
-							nextIndex = prevIndex;
-							continue;
-						}
-
-						/* count the number of points of the node, which are mapped before and after the
-						*	single point and check if a swap would reduce the overall number of crossings */
-						size_t mappedBefore = 0, mappedAfter = 0, firstIndex = prevIndex;
-						while (true) {
-							if (map.mapped(layer.points[firstIndex])) {
-								if (int8_t res = map.order(layer.points[firstIndex], next); res != 0)
-									++(res < 0 ? mappedBefore : mappedAfter);
-							}
-							if (firstIndex == 0 || !layer.points[firstIndex - 1].node)
-								break;
-							--firstIndex;
-						}
-						if (mappedBefore >= mappedAfter)
-							break;
-
-						/* rotate the next point to lie before all points of the node
-						*	and reset the index accordingly to try to restart the process */
-						for (size_t j = nextIndex; j > firstIndex; --j)
-							fSwapPoints(layer.points[j - 1], layer.points[j], layer);
-						nextIndex = firstIndex;
-					}
-				}
-			}
-			void fConstructLayers(std::vector<detail::_Layer>& layers) const {
-				/* setup the map of all ranges to their indices (sorted by their start) */
-				std::set<Opened> open;
-				for (size_t i = 0; i < pRanges.size(); ++i)
-					open.insert({ pRanges[i], i });
-
-				/* setup the overall layers and phantom points */
-				while (true) {
-					/* insert all upcoming nodes, which need to be added to this layer */
-					if (!open.empty()) {
-						auto itNext = open.begin();
-
-						/* check if a new layer needs to be pushed */
-						if (layers.empty() || layers.back().index < itNext->range.first)
-							layers.push_back(detail::_Layer{ .index = itNext->range.first });
-						detail::_Layer& layer = layers.back();
-
-						/* insert all ranges, which start before or at the current layer */
-						while (!open.empty() && itNext->range.first <= layer.index) {
-							layer.points.push_back({ .range = itNext->origin });
-							layer.index = std::min<size_t>(itNext->range.first, layer.index);
-							itNext = open.erase(itNext);
-						}
-					}
-					detail::_Layer& layer = layers.back();
-
-					/* iterate over the current layer and setup the extension of all open ranges into the next layer */
-					detail::_Layer next{ .index = std::numeric_limits<size_t>::max() };
-					for (const detail::_Point& point : layer.points) {
-						if (pRanges[point.range].second <= layer.index)
-							continue;
-						next.points.push_back({ .range = point.range });
-						next.index = std::min<size_t>(next.index, pRanges[point.range].second);
-					}
-
-					/* check if new ranges have been found to be inserted
-					*	as the next layer or if the end has been reached */
-					if (!next.points.empty())
-						layers.emplace_back(std::move(next));
-					else if (open.empty())
-						break;
-				}
-
-				/* iterate over the layers and link the points together (after
-				*	setting up all layers, as it creates references between layers) */
-				std::map<size_t, size_t> rangePrevious;
-				for (size_t i = 0; i < layers.size(); ++i) {
-					detail::_Layer& layer = layers[i];
-
-					/* link the crossings count up */
-					if (i > 0)
-						layers[i - 1].nextCrossings = &layer.prevCrossings;
-
-					/* sort the ranges in the layer to ensure ranges, which belong to this layer (i.e. start/end at
-					*	this layer), are neighbors (must at least be one), and setup the point flags accordingly */
-					size_t belongCount = 0;
-					for (size_t j = 0; j < layer.points.size(); ++j) {
-						if (pRanges[layer.points[j].range].first != layer.index && pRanges[layer.points[j].range].second != layer.index)
-							continue;
-						if (belongCount != j)
-							std::swap(layer.points[j].range, layer.points[belongCount].range);
-						layer.points[belongCount++].node = true;
-					}
-
-					/* iterate over the ranges again (after sorting, as this rotates the ranges
-					*	around) and setup the mappings and references to the previous layer */
-					for (size_t j = 0; j < layer.points.size(); ++j) {
-						/* check if this range is part of the previous layer */
-						detail::_Point& point = layer.points[j];
-						if (pRanges[point.range].first >= layer.index)
-							continue;
-
-						/* link the points together (references are stable, as the lists have already been
-						*	populated with all points, and will not be reallocated anymore, just moved) */
-						point.prev = &layers[i - 1].points[rangePrevious.find(point.range)->second];
-						point.prev->next = &layer.points[j];
-
-						/* update the crossing count by checking if this mapping crosses any previous mappings */
-						if (!point.node) for (size_t k = 0; k < j; ++k) {
-							detail::_Point* prev = layer.points[k].prev;
-							if (prev != nullptr && prev > point.prev && (!prev->node || !point.prev->node))
-								++layer.prevCrossings;
-						}
-					}
-
-					/* try to reduce the initial crossing count */
-					fPatchLayer<ForwardPatch>(layer);
-
-					/* iterate over the ranges again (after the initial patch, as this rotates
-					*	the ranges around) and setup the initial mapping for the upcoming layer */
-					rangePrevious.clear();
-					for (size_t j = 0; j < layer.points.size(); ++j) {
-						if (detail::_Point& point = layer.points[j]; pRanges[point.range].second > layer.index)
-							rangePrevious.insert({ point.range, j });
-					}
-				}
-			}
-
-		private:
-			/* use FNV-1a hashing to hash the point order (to simplify the algorihm, states are not
-			*	identified by identical graph state, but rather by identical hash and edge count) */
-			static constexpr uint64_t HashInit = 0xcbf29ce484222325;
-			uint64_t fHashJoin(uint64_t hash, size_t value) const {
-				for (size_t i = 0; i < sizeof(value); ++i) {
-					hash = (hash ^ static_cast<uint8_t>(value)) * 0x00000100000001b3;
-					value >>= 8;
-				}
-				return hash;
-			}
-			void fOptimizeLayers(std::vector<detail::_Layer>& layers) const {
-				std::map<LayoutIdentifier, LayoutState> states;
-				std::optional<size_t> bestCrossings = std::nullopt;
-				LayoutEdge* edgeTaken = nullptr;
-				size_t nextStamp = 0;
-
-				/* iterate until either all states have been visited or a null-costs instance has been found */
-				size_t count = 0;
-				while (true) {
-					/* measure the current layout state by summing up the
-					*	crossings and creating the hash over all points */
-					LayoutIdentifier identifier{ .hash = HashInit, .crossings = 0 };
-					for (const detail::_Layer& layer : layers) {
-						identifier.crossings += layer.prevCrossings;
-						for (const detail::_Point& point : layer.points)
-							identifier.hash = fHashJoin(identifier.hash, point.range);
-					}
-
-					/* check if a better result has been found and store it as the best match */
-					if (!bestCrossings.has_value() || identifier.crossings < *bestCrossings) {
-						bestCrossings = identifier.crossings;
-						for (detail::_Layer& layer : layers) {
-							for (detail::_Point& point : layer.points)
-								point.bestRange = point.range;
-						}
-					}
-					if (*bestCrossings == 0)
-						return;
-
-					/* write the current state back as the target of the last operation */
-					if (edgeTaken != nullptr)
-						edgeTaken->target = identifier;
-
-					/* check if a new state has been discovered and extract all possible edges into the map */
-					if (!states.contains(identifier)) {
-						LayoutState& state = states[identifier];
-						for (size_t i = 0; i < layers.size(); ++i) {
-							if (layers[i].prevCrossings > 0)
-								state.edges.push_back(LayoutEdge{ .index = i, .forward = true, .target = std::nullopt });
-							if (layers[i].nextCrossings != nullptr && *layers[i].nextCrossings > 0)
-								state.edges.push_back(LayoutEdge{ .index = i, .forward = false, .target = std::nullopt });
-						}
-					}
-
-					/* initialize the queue and allocate the next state-stamp to be used */
-					std::list<std::pair<LayoutIdentifier, LayoutEdge*>> queue{ { identifier, nullptr } };
-					size_t stamp = (states[identifier].stamp = ++nextStamp);
-					edgeTaken = nullptr;
-
-					/* find the next closest edge, which leads to an undiscovered target */
-					while (!queue.empty() && edgeTaken == nullptr) {
-						LayoutState& state = states[queue.front().first];
-						LayoutEdge* source = queue.front().second;
-						queue.pop_front();
-
-						/* iterate over the edges in the top-state and check if one of them has not yet been evaluated */
-						for (LayoutEdge& edge : state.edges) {
-							if (!edge.target.has_value()) {
-								edgeTaken = (source == nullptr ? &edge : source);
-								break;
-							}
-
-							LayoutState& target = states[*edge.target];
-							if (target.stamp >= stamp)
-								continue;
-							target.stamp = stamp;
-							queue.push_back({ *edge.target, (source == nullptr ? &edge : source) });
-						}
-					}
-
-					/* check if the entire graph has been fully searched (in which case the best ranges
-					*	will have been written to the points) and otherwise apply the operation */
-					if (edgeTaken == nullptr)
-						return;
-					if (edgeTaken->forward)
-						fPatchLayer<ForwardPatch>(layers[edgeTaken->index]);
-					else
-						fPatchLayer<BackwardPatch>(layers[edgeTaken->index]);
-				}
-			}
-
-		public:
-			void build(std::vector<detail::_Layer>& layers) {
-				layers.clear();
-				fConstructLayers(layers);
-				fOptimizeLayers(layers);
 			}
 		};
 	}
