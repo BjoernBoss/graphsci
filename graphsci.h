@@ -904,13 +904,109 @@ namespace ascg {
 				}
 			}
 
+			struct Slot {
+				size_t target = 0;
+				bool used = false;
+			};
+			struct SwapMatch {
+				size_t index = 0;
+				size_t target = 0;
+				size_t rotate = 0;
+				bool leftRotate = false;
+			};
+			std::optional<SwapMatch> fFindNextSwap(std::vector<Slot>& slice) const {
+				size_t bestIndex = 0, bestSkip = 0, bestTarget = 0;
+				bool bestCanMove = false, bestMoveLeft = false;
+
+				/* find the next entry which can already move or which has to move the furthest */
+				for (size_t i = 0; i < slice.size(); ++i) {
+					if (!slice[i].used)
+						continue;
+					size_t leftSkip = 0, leftTarget = 0, rightSkip = 0, rightTarget = 0;
+
+					/* count the number of connections to skip to move it in order
+					*	and check if the entry is already positioned correctly */
+					for (size_t j = i; j > 0; --j) {
+						if (!slice[j - 1].used) continue;
+						if (slice[j - 1].target < slice[i].target) break;
+						++leftSkip;
+						leftTarget = j - 1;
+					}
+					for (size_t j = i + 1; j < slice.size(); ++j) {
+						if (!slice[j].used) continue;
+						if (slice[j].target > slice[i].target) break;
+						++rightSkip;
+						rightTarget = j;
+					}
+					if (leftSkip == 0 && rightSkip == 0)
+						continue;
+
+					/* check if any of the two positions can already move */
+					bool leftCanMove = (leftSkip > 0 && leftTarget > 0 && !slice[leftTarget - 1].used);
+					bool rightCanMove = (rightSkip > 0 && rightTarget + 1 < slice.size() && !slice[rightTarget + 1].used);
+
+					/* check if the left direction is better than the current best */
+					if (leftSkip > 0 && ((leftCanMove && !bestCanMove) || (leftCanMove == bestCanMove && leftSkip > bestSkip))) {
+						bestIndex = i;
+						bestSkip = leftSkip;
+						bestTarget = leftTarget;
+						bestCanMove = leftCanMove;
+						bestMoveLeft = true;
+					}
+
+					/* check if the right direction is better than the current best */
+					if (rightSkip > 0 && ((rightCanMove && !bestCanMove) || (rightCanMove == bestCanMove && rightSkip > bestSkip))) {
+						bestIndex = i;
+						bestSkip = rightSkip;
+						bestTarget = rightTarget;
+						bestCanMove = rightCanMove;
+						bestMoveLeft = false;
+					}
+				}
+
+				/* check if no swap was found or if it can be moved immediately */
+				if (bestSkip == 0)
+					return std::nullopt;
+				if (bestCanMove)
+					return SwapMatch{ .index = bestIndex, .target = (bestMoveLeft ? bestTarget - 1 : bestTarget + 1) };
+
+				/* shift the target for right movements, as this reduces
+				*	the off-by-one patching for the upcoming loops */
+				if (!bestMoveLeft)
+					++bestTarget;
+
+				/* find the next possible empty slot in either direction,
+				*	and count the number of moves it would require */
+				size_t leftMove = 0, rightMove = 0;
+				for (size_t i = bestTarget + 1; i < slice.size(); ++i) {
+					if (slice[i].used) continue;
+					rightMove = i - bestTarget;
+					break;
+				}
+				for (size_t i = bestTarget; i > 0; --i) {
+					if (slice[i - 1].used) continue;
+					leftMove = bestTarget - i;
+					break;
+				}
+
+				/* configure the swap state accordingly to use the direction with least amount of rotation
+				*	necessary (one must exist, as each row is guaranteed to have at least one empty spot) */
+				SwapMatch output{ .index = bestIndex, .target = bestTarget };
+				if ((leftMove > 0 && leftMove <= rightMove) || rightMove == 0) {
+					output.rotate = leftMove;
+					output.leftRotate = true;
+					--output.target;
+				}
+				else {
+					output.rotate = rightMove;
+					output.leftRotate = false;
+				}
+				return output;
+			}
+
+
 
 			void fUpdateAlignment(std::vector<Row>& grid, size_t index, bool forward) const {
-				struct Slot {
-					size_t target = 0;
-					bool used = false;
-				};
-
 				if (forward && index + 1 >= grid.size())
 					return;
 				if (!forward && index == 0)
@@ -931,91 +1027,17 @@ namespace ascg {
 				}
 
 				while (true) {
-					std::optional<size_t> best;
-					size_t bestSkip = 0, bestIndex = 0;
-					bool bestCanMove = false;
-
-					/* find the next entry which has to move the furthest or which can already move */
-					for (size_t i = 0; i < slice.size(); ++i) {
-						if (!slice[i].used) continue;
-						size_t leftSkip = 0, leftIndex = 0, rightSkip = 0, rightIndex = 0;
-
-						/* count the number of connections to skip and check if the entry is already positioned correctly */
-						for (size_t j = i; j > 0; --j) {
-							if (!slice[j - 1].used) continue;
-							if (slice[j - 1].target < slice[i].target) break;
-							++leftSkip;
-							leftIndex = j - 1;
-						}
-						for (size_t j = i + 1; j < slice.size(); ++j) {
-							if (!slice[j].used) continue;
-							if (slice[j].target > slice[i].target) break;
-							++rightSkip;
-							rightIndex = j;
-						}
-						if (leftSkip == 0 && rightSkip == 0)
-							continue;
-
-						/* check if any of the two positions can already move */
-						bool leftCanMove = (leftSkip > 0 && leftIndex > 0 && !slice[leftIndex - 1].used);
-						bool rightCanMove = (rightSkip > 0 && rightIndex + 1 < slice.size() && !slice[rightIndex + 1].used);
-
-						/* check if the left direction is better than the current best */
-						if (leftSkip > 0 && (!best.has_value() || (leftCanMove && !bestCanMove) || (leftCanMove == bestCanMove && leftSkip > bestSkip))) {
-							best = i;
-							bestSkip = leftSkip;
-							bestIndex = leftIndex;
-							bestCanMove = leftCanMove;
-						}
-
-						/* check if the right direction is better than the current best */
-						if (rightSkip > 0 && (!best.has_value() || (rightCanMove && !bestCanMove) || (rightCanMove == bestCanMove && rightSkip > bestSkip))) {
-							best = i;
-							bestSkip = rightSkip;
-							bestIndex = rightIndex;
-							bestCanMove = rightCanMove;
-						}
-					}
-
-					/* check if none has been found, in which case the ordering is already correct */
-					if (!best.has_value())
+					/* find the next swap to be performed (if none has been found, the ordering is already correct) */
+					std::optional<SwapMatch> swap = fFindNextSwap(slice);
+					if (!swap.has_value())
 						break;
-					bool bestMoveLeft = (bestIndex < *best);
 
-					/* check if the slot can just be moved over */
-					if (bestCanMove) {
-						std::swap(slice[*best], slice[bestMoveLeft ? bestIndex - 1 : bestIndex + 1]);
-						continue;
-					}
-
-					/* find the next empty slot to use, which requires least moving */
-					size_t leftMove = 0, rightMove = 0;
-					for (size_t i = bestIndex + 1; i < slice.size(); ++i) {
-						if (slice[i].used) continue;
-						rightMove = i - bestIndex - (bestMoveLeft ? 0 : 1);
-						break;
-					}
-					for (size_t i = bestIndex; i > 0; --i) {
-						if (slice[i - 1].used) continue;
-						leftMove = bestIndex - i + (bestMoveLeft ? 0 : 1);
-						break;
-					}
-
-					/* find the direction to use and move it over accordingly (must exist,
-					*	as each row is guaranteed to have at least one empty spot) */
-					if ((leftMove > 0 && leftMove <= rightMove) || rightMove == 0) {
-						if (bestMoveLeft)
-							--bestIndex;
-						for (size_t i = bestIndex - leftMove; i < bestIndex; ++i)
-							std::swap(slice[i], slice[i + 1]);
-					}
-					else {
-						if (!bestMoveLeft)
-							++bestIndex;
-						for (size_t i = bestIndex + rightMove; i > bestIndex; --i)
-							std::swap(slice[i], slice[i - 1]);
-					}
-					std::swap(slice[bestIndex], slice[*best]);
+					/* apply the rotation and the final move */
+					if (swap->leftRotate) for (size_t i = swap->target - swap->rotate; i < swap->target; ++i)
+						std::swap(slice[i], slice[i + 1]);
+					else for (size_t i = swap->target + swap->rotate; i > swap->target; --i)
+						std::swap(slice[i], slice[i - 1]);
+					std::swap(slice[swap->index], slice[swap->target]);
 				}
 
 				size_t otherNodeStart = 0, otherNodeSize = 0;
@@ -1106,6 +1128,135 @@ namespace ascg {
 					}
 				}
 			}
+			void fDrawRow(Row& row) const {
+				std::string line = "*";
+
+				for (size_t i = 0; i < row.size(); ++i) {
+					if (i > 0)
+						line.push_back((row[i - 1].kind == EntryKind::node && row[i].kind == EntryKind::node) ? '#' : ' ');
+					if (row[i].kind == EntryKind::node)
+						line.push_back('#');
+					else if (row[i].kind == EntryKind::traverse)
+						line.push_back('|');
+					else
+						line.push_back(' ');
+				}
+
+				str::PrintLn(line, '*');
+			}
+
+			void fDrawTransition(Row& row) const {
+				std::vector<std::string> lines;
+
+				std::vector<Slot> slice;
+				slice.reserve(row.size());
+				for (size_t i = 0; i < row.size(); ++i) {
+					if (row[i].hasStart)
+						slice.push_back(Slot{ .target = row[i].start, .used = true });
+					else
+						slice.push_back(Slot{});
+				}
+
+				const auto addTransitions = [&slice](size_t begin, size_t end, std::string& line) -> void {
+					for (size_t i = begin; i < end; ++i) {
+						if (i > 0)
+							line.push_back(' ');
+						line.push_back(slice[i].used ? '|' : ' ');
+					}
+				};
+
+				/* add all rotations and swaps */
+				while (true) {
+					std::optional<SwapMatch> swap = fFindNextSwap(slice);
+					if (!swap.has_value())
+						break;
+
+					size_t next = (swap->leftRotate ? (swap->target - swap->rotate) : (swap->target + swap->rotate + 1));
+					for (size_t i = 0; i < swap->rotate; ++i) {
+						std::string& line = lines.emplace_back("*");
+
+						addTransitions(0, next, line);
+
+						if (next > 0)
+							line.push_back(' ');
+						line.append(swap->leftRotate ? ",-'" : "'-,");
+						std::swap(slice[next], slice[next + 1]);
+
+						addTransitions(next + 2, slice.size(), line);
+						line.push_back('*');
+
+						if (swap->leftRotate)
+							++next;
+						else
+							--next;
+					}
+
+					std::string& line = lines.emplace_back("*");
+					addTransitions(0, std::min<size_t>(swap->index, swap->target), line);
+
+					if (swap->index > 0 && swap->target > 0)
+						line.push_back(' ');
+					line.push_back((swap->index < swap->target) ? '\'' : ',');
+					for (size_t i = std::min<size_t>(swap->index, swap->target) + 1; i < std::max<size_t>(swap->index, swap->target); ++i)
+						line.append(slice[i].used ? "-|" : "--");
+					line.append((swap->index < swap->target) ? "-," : "-'");
+
+					std::swap(slice[swap->index], slice[swap->target]);
+
+					addTransitions(std::max<size_t>(swap->index, swap->target) + 1, slice.size(), line);
+					line.push_back('*');
+				}
+
+				/* align all entries with their target */
+				while (true) {
+					/* find the next mis-placed entry, which can be moved to its new placement */
+					size_t next = 0;
+					for (; next < slice.size(); ++next) {
+						if (!slice[next].used || slice[next].target == next)
+							continue;
+
+						/* check if the entire range is usable */
+						bool blocked = false;
+						for (size_t i = std::min<size_t>(next, slice[next].target); i <= std::max<size_t>(next, slice[next].target); ++i) {
+							if (i == next || !slice[i].used)
+								continue;
+							blocked = true;
+							break;
+						}
+						if (!blocked)
+							break;
+					}
+
+					/* check if nothing needs to be done (all slices are already well ordered) */
+					if (next == slice.size()) {
+						if (lines.empty())
+							addTransitions(0, slice.size(), lines.emplace_back());
+						break;
+					}
+					std::string& line = lines.emplace_back("*");
+
+					/* fill in the intermediate slots */
+					size_t base = std::min<size_t>(next, slice[next].target);
+					size_t end = std::max<size_t>(next, slice[next].target);
+					addTransitions(0, base, line);
+
+					/* add the move itself */
+					if (base > 0)
+						line.push_back(' ');
+					line.push_back((base == next) ? '\'' : ',');
+					for (size_t i = base + 1; i < end; ++i)
+						line.append(slice[i].used ? "-|" : "--");
+					line.append((base == next) ? "-," : "-'");
+
+					size_t other = slice[next].target;
+					std::swap(slice[other], slice[next]);
+					addTransitions(end + 1, slice.size(), line);
+					line.push_back('*');
+				}
+
+				for (const auto& line : lines)
+					str::PrintLn(line);
+			}
 
 		public:
 			void draw(const std::vector<detail::Layer>& layers) const {
@@ -1127,6 +1278,13 @@ namespace ascg {
 				//	for (size_t j = grid.size(); j > 0; --j)
 				//		fLayoutRow(grid, j - 1);
 				//}
+
+				for (size_t i = 0; i < grid.size(); ++i) {
+					fDrawRow(grid[i]);
+					if (i + 1 < grid.size())
+						fDrawTransition(grid[i]);
+				}
+				return;
 
 				for (size_t i = 0; i < grid.size(); ++i) {
 					const Row& row = grid[i];
