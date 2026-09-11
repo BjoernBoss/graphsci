@@ -16,217 +16,28 @@
 #include <ustring/ustring.h>
 
 namespace ascg {
-	namespace detail {
-		struct _Node {
-			size_t row = 0;
-			size_t in = 0;
-			size_t out = 0;
-			bool added = false;
-		};
-	}
-
+	/*
+	*	Describes a layered graph made up of: # | - , '
+	*	The graph is bidirectional, and cannot contain self-loops.
+	*	The the layouting will select an ordering of the transitions and lay it out as ascii art.
+	*	The ordering of the nodes from top to bottom will not be modified and will be used as provided.
+	*/
 	struct Graph {
+		/* separate rows of the ascii graph */
 		std::vector<std::string> rows;
+
+		/* mapping of each row to the node it belongs to with (size_t)-1 for intermediate rows */
 		std::vector<size_t> map;
 	};
 
-	class Builder {
-	private:
-		std::vector<std::string> pRows;
-		std::vector<detail::_Node> pNodes;
-		size_t pWidth = 0;
-		char pHalfIndexUp = 0;
-		char pHalfIndexDown = 0;
-
-	public:
-		Builder(bool growDown) {
-			pHalfIndexUp = (growDown ? '.' : '\'');
-			pHalfIndexDown = (growDown ? '\'' : '.');
-		}
-
-	private:
-		void fEnsureWidth(size_t width) {
-			if (pWidth >= width)
-				return;
-			pWidth = width;
-			for (std::string& row : pRows)
-				row.resize(pWidth, ' ');
-		}
-		void fInsertRow(size_t index) {
-			/* translate all nodes accordingly */
-			for (detail::_Node& node : pNodes) {
-				if (node.row >= index)
-					++node.row;
-			}
-
-			/* insert the filler line and extract the line below and above */
-			std::string& line = *pRows.emplace(pRows.begin() + index, std::string(pWidth, ' '));
-			std::string_view prev{ index > 0 ? std::string_view{ pRows[index - 1] } : std::string_view{} };
-			std::string_view next{ index + 1 < pRows.size() ? std::string_view{pRows[index + 1]} : std::string_view{} };
-
-			/* construct the added row such that all edges are preserved */
-			for (size_t j = 0; j < prev.size(); ++j)
-				if (prev[j] == '|' || prev[j] == pHalfIndexUp) line[j] = '|';
-			for (size_t j = 0; j < next.size(); ++j)
-				if (next[j] == '|' || next[j] == pHalfIndexDown) line[j] = '|';
-		}
-		void fInsertCrossing(size_t row, size_t in, size_t out) {
-			std::string& line = pRows[row];
-
-			/* add the entry and exit */
-			line[in] = pHalfIndexDown;
-			line[out] = pHalfIndexUp;
-
-			/* add the intermediate lines */
-			size_t start = std::min<size_t>(in, out), end = std::max<size_t>(in, out);
-			for (size_t i = start + 1; i < end; ++i) {
-				if (line[i] == ' ')
-					line[i] = '-';
-			}
-		}
-		void fEstablishNode(size_t index) {
-			/* check if new rows need to be added to the output */
-			while (pNodes.size() <= index) {
-				pNodes.push_back({ .row = pRows.size(), .in = 0, .out = 0, .added = false });
-				pRows.emplace_back(pWidth, ' ');
-			}
-
-			/* check if the node has already been added */
-			detail::_Node& node = pNodes[index];
-			if (node.added)
-				return;
-		}
-
-	public:
-		void addNode(size_t index, size_t edges) {
-			/* check if new rows need to be added to the output */
-			while (pNodes.size() <= index) {
-				pNodes.push_back({ .row = pRows.size(), .in = 0, .out = 0, .added = false });
-				pRows.emplace_back(pWidth, ' ');
-			}
-			detail::_Node& node = pNodes[index];
-
-			/* check if the node has already been added */
-			if (node.added)
-				return;
-			size_t offset = 0, length = (2 * edges - 1);
-
-			/* find the place for the node within the row (must be axis-aligned to two characters) */
-			std::string& row = pRows[node.row];
-			for (size_t match = 0;; match = 0) {
-				for (; match < length; ++match) {
-					if (offset + match < row.size() && row[offset + match] != ' ')
-						break;
-				}
-				if (match >= length)
-					break;
-				offset = (offset + match + 2) & ~size_t(0x01);
-			}
-			fEnsureWidth(offset + length);
-
-			/* prepare the node and row */
-			node.added = true;
-			node.out = (node.in = offset);
-			std::fill(row.begin() + offset, row.begin() + offset + length, '#');
-
-			/* check if offset-rows need to be added above or beneath (in order to prevent nodes from clumping together) */
-			for (size_t i = 0; i < 2; ++i) {
-				if ((i == 0 ? node.row == 0 : node.row + 1 >= pRows.size()))
-					continue;
-
-				/* check if the nodes touch and insert a filler-line accordingly */
-				const std::string& other = pRows[(i == 0 ? node.row - 1 : node.row + 1)];
-				if (std::any_of(other.begin() + offset, other.begin() + offset + length, [](char c) { return (c == '#'); }))
-					fInsertRow(i == 0 ? node.row : node.row + 1);
-			}
-		}
-		void connect(size_t first, size_t last) {
-			/* ensure the order of the nodes */
-			if (first > last)
-				std::swap(first, last);
-			else if (first == last)
-				return;
-
-			/* allocate the source and target columns */
-			size_t current = pNodes[first].out;
-			pNodes[first].out += 2;
-			size_t target = pNodes[last].in;
-			pNodes[last].in += 2;
-			fEnsureWidth(std::max<size_t>(current, target) + 1);
-
-			/* translate the nodes to actual rows (first row to the actual first row to be modified) */
-			first = pNodes[first].row + 1;
-			last = pNodes[last].row;
-
-			/* check if the row ahead is blocked by another component or if the two nodes
-			*	are directly back to back, in which case another entry needs to be added */
-			if (first == last || (pRows[first][current] != ' ' && pRows[first][current] != '-')) {
-				fInsertRow(first);
-				++last;
-			}
-
-			/* iterate until the nodes have been connected */
-			while (first + 1 < last) {
-				std::string& next = pRows[first];
-
-				/* check if the path diretly above is blocked, in which case an intermediate row needs to be added */
-				if (next[current] != ' ')
-					fInsertRow(last++);
-
-				/* check if the path can just move up */
-				else if (pRows[first + 1][current] == ' ')
-					next[current] = '|';
-				else {
-					/* check how many steps to the right are required until the top is free again */
-					size_t shift = 2;
-					while (current + shift < pWidth && pRows[first + 1][current + shift] != ' ') {
-						if (next[current + shift] != ' ' && next[current + shift] != '|') {
-							shift -= 2;
-							break;
-						}
-						shift += 2;
-					}
-					fEnsureWidth(current + shift + 1);
-
-					/* check if a shift can be performed, or if another empty row needs to be inserted */
-					if (shift == 0)
-						fInsertRow(last++);
-					else {
-						fInsertCrossing(first, current, current + shift);
-						current += shift;
-					}
-				}
-
-				/* advance to the next row */
-				++first;
-			}
-
-			/* check if a simple connecting line is enough (between two nodes, there can at most be '-' or ' ' above) */
-			if (current == target) {
-				pRows[first][current] = '|';
-				return;
-			}
-
-			/* check if the crossing can be performed or if another row needs to be inserted (if the row needs to
-			*	be inserted, extend the current line by one, as it will otherwise be shy by one to the crossing) */
-			size_t start = std::min<size_t>(current, target), finish = std::max<size_t>(current, target);
-			if (std::any_of(pRows[first].begin() + start, pRows[first].begin() + finish, [](char c) { return (c != ' ' && c != '|'); })) {
-				pRows[first][current] = '|';
-				fInsertRow(++first);
-			}
-
-			/* insert the crossing */
-			fInsertCrossing(first, current, target);
-		}
-		ascg::Graph finalize() {
-			ascg::Graph out{ .rows = pRows };
-			for (size_t i = 0; i < pNodes.size(); ++i)
-				out.map.push_back(pNodes[i].row);
-			return out;
-		}
-	};
-
+	/* fix add mapping */
+	/* add self-loops?/double-edges?/directions? */
 	namespace detail {
+		struct Range {
+			size_t first = 0;
+			size_t last = 0;
+		};
+
 		struct Endpoint {
 			size_t range = 0;
 			size_t other = 0;
@@ -373,7 +184,7 @@ namespace ascg {
 			size_t index = 0;
 		};
 
-		class Builder {
+		class LayerGraph {
 		private:
 			struct Opened {
 				size_t range = 0;
@@ -398,17 +209,17 @@ namespace ascg {
 			};
 
 		public:
-			Builder() = default;
+			LayerGraph() = default;
 
 		private:
-			void fConstructLayers(const std::vector<std::pair<size_t, size_t>>& ranges, std::vector<detail::Layer>& layers) const {
+			void fConstructLayers(const std::vector<detail::Range>& ranges, std::vector<detail::Layer>& layers) const {
 				if (ranges.empty())
 					return;
 
 				/* setup the map of all ranges to their indices (sorted by their start) */
 				std::set<Opened> open;
 				for (size_t i = 0; i < ranges.size(); ++i)
-					open.insert(Opened{ .range = i, .start = ranges[i].first, .end = ranges[i].second });
+					open.insert(Opened{ .range = i, .start = ranges[i].first, .end = ranges[i].last });
 
 				/* setup the overall layers and nodes and traverse points */
 				std::optional<size_t> layerNext = open.begin()->start;
@@ -438,13 +249,13 @@ namespace ascg {
 					/* helper to connect a range to the top layer and ensure proper linkage between the
 					*	layers and to ensure the next assumed layer respects all currently open endings */
 					const auto addRange = [&ranges, &layer, &layerNext](size_t range, size_t index) -> size_t {
-						if (ranges[range].second == layer.index) {
+						if (ranges[range].last == layer.index) {
 							layer.points[0].node().end.push({ .range = range, .other = index });
 							return 0;
 						}
 						layer.points.push_back(detail::Point{ .body = detail::Traverse{.range = range, .prev = index } });
-						if (!layerNext.has_value() || ranges[range].second < *layerNext)
-							layerNext = ranges[range].second;
+						if (!layerNext.has_value() || ranges[range].last < *layerNext)
+							layerNext = ranges[range].last;
 						return layer.points.size() - 1;
 					};
 
@@ -562,8 +373,9 @@ namespace ascg {
 			}
 
 		public:
-			void build(const std::vector<std::pair<size_t, size_t>>& ranges, std::vector<detail::Layer>& layers) const {
-				layers.clear();
+			std::vector<detail::Layer> build(const std::vector<detail::Range>& ranges) const {
+				std::vector<detail::Layer> layers;
+
 				fConstructLayers(ranges, layers);
 				str::PrintLn("Crossings: ", fCountCrossings(layers));
 
@@ -581,6 +393,8 @@ namespace ascg {
 						str::PrintLn("Crossings: ", fCountCrossings(layers));
 					}
 				}
+
+				return layers;
 			}
 		};
 		class Renderer {
@@ -1128,12 +942,16 @@ namespace ascg {
 					}
 				}
 			}
-			void fDrawRow(Row& row) const {
-				std::string line = "*";
 
+			void fDrawRow(Row& row, ascg::Graph& graph) const {
+				std::string& line = graph.rows.emplace_back();
+
+				/* iterate over the slots of the row and draw them to the string line */
 				for (size_t i = 0; i < row.size(); ++i) {
 					if (i > 0)
 						line.push_back((row[i - 1].kind == EntryKind::node && row[i].kind == EntryKind::node) ? '#' : ' ');
+
+					/* draw the node or connection itself */
 					if (row[i].kind == EntryKind::node)
 						line.push_back('#');
 					else if (row[i].kind == EntryKind::traverse)
@@ -1141,12 +959,9 @@ namespace ascg {
 					else
 						line.push_back(' ');
 				}
-
-				str::PrintLn(line, '*');
 			}
-
-			void fDrawTransition(Row& row) const {
-				std::vector<std::string> lines;
+			void fDrawTransition(Row& row, ascg::Graph& graph) const {
+				size_t startOfLines = graph.rows.size();
 
 				std::vector<Slot> slice;
 				slice.reserve(row.size());
@@ -1171,9 +986,9 @@ namespace ascg {
 					if (!swap.has_value())
 						break;
 
-					size_t next = (swap->leftRotate ? (swap->target - swap->rotate) : (swap->target + swap->rotate + 1));
+					size_t next = (swap->leftRotate ? (swap->target - swap->rotate) : (swap->target + swap->rotate - 1));
 					for (size_t i = 0; i < swap->rotate; ++i) {
-						std::string& line = lines.emplace_back("*");
+						std::string& line = graph.rows.emplace_back();
 
 						addTransitions(0, next, line);
 
@@ -1183,7 +998,6 @@ namespace ascg {
 						std::swap(slice[next], slice[next + 1]);
 
 						addTransitions(next + 2, slice.size(), line);
-						line.push_back('*');
 
 						if (swap->leftRotate)
 							++next;
@@ -1191,7 +1005,7 @@ namespace ascg {
 							--next;
 					}
 
-					std::string& line = lines.emplace_back("*");
+					std::string& line = graph.rows.emplace_back();
 					addTransitions(0, std::min<size_t>(swap->index, swap->target), line);
 
 					if (swap->index > 0 && swap->target > 0)
@@ -1204,7 +1018,6 @@ namespace ascg {
 					std::swap(slice[swap->index], slice[swap->target]);
 
 					addTransitions(std::max<size_t>(swap->index, swap->target) + 1, slice.size(), line);
-					line.push_back('*');
 				}
 
 				/* align all entries with their target */
@@ -1229,11 +1042,11 @@ namespace ascg {
 
 					/* check if nothing needs to be done (all slices are already well ordered) */
 					if (next == slice.size()) {
-						if (lines.empty())
-							addTransitions(0, slice.size(), lines.emplace_back());
+						if (graph.rows.size() == startOfLines)
+							addTransitions(0, slice.size(), graph.rows.emplace_back());
 						break;
 					}
-					std::string& line = lines.emplace_back("*");
+					std::string& line = graph.rows.emplace_back();
 
 					/* fill in the intermediate slots */
 					size_t base = std::min<size_t>(next, slice[next].target);
@@ -1251,15 +1064,13 @@ namespace ascg {
 					size_t other = slice[next].target;
 					std::swap(slice[other], slice[next]);
 					addTransitions(end + 1, slice.size(), line);
-					line.push_back('*');
 				}
-
-				for (const auto& line : lines)
-					str::PrintLn(line);
 			}
 
 		public:
-			void draw(const std::vector<detail::Layer>& layers) const {
+			ascg::Graph draw(const std::vector<detail::Layer>& layers) const {
+				ascg::Graph graph{};
+
 				std::vector<Row> grid;
 
 				fConstructGrid(layers, grid);
@@ -1280,48 +1091,19 @@ namespace ascg {
 				//}
 
 				for (size_t i = 0; i < grid.size(); ++i) {
-					fDrawRow(grid[i]);
+					fDrawRow(grid[i], graph);
 					if (i + 1 < grid.size())
-						fDrawTransition(grid[i]);
+						fDrawTransition(grid[i], graph);
 				}
-				return;
-
-				for (size_t i = 0; i < grid.size(); ++i) {
-					const Row& row = grid[i];
-
-					std::string start = "", line = "", end = "";
-					for (size_t j = 0; j < row.size(); ++j) {
-						if (row[j].hasStart && row[j].start != j)
-							start.push_back((row[j].start < j) ? '<' : '>');
-						else
-							start.push_back(row[j].hasStart ? '\'' : ' ');
-
-						if (row[j].hasEnd && row[j].end != j)
-							end.push_back((row[j].end < j) ? '<' : '>');
-						else
-							end.push_back(row[j].hasEnd ? ',' : ' ');
-
-						if (row[j].kind == EntryKind::node)
-							line.push_back('#');
-						else if (row[j].kind == EntryKind::blocked)
-							line.push_back('X');
-						else
-							line.push_back(row[j].kind == EntryKind::traverse ? '|' : ' ');
-					}
-					str::PrintLn(end, '\n', line, '\n', start);
-				}
+				return graph;
 			}
 		};
 	}
 
 
-	/* add self-loops?/double-edges?/remove 'std::pair'/add directions? */
-	/* make use of [pFirst], [pLast] */
-	class _Builder {
+	class Builder {
 	private:
-		std::vector<std::pair<size_t, size_t>> pRanges;
-		size_t pFirst = 0;
-		size_t pLast = 0;
+		std::vector<detail::Range> pRanges;
 
 	public:
 		void connect(size_t a, size_t b) {
@@ -1329,20 +1111,11 @@ namespace ascg {
 				std::swap(a, b);
 			else if (a == b)
 				return;
-
-			/* update the overall limits and insert the range */
-			if (pRanges.empty())
-				pFirst = a, pLast = b;
-			else
-				pFirst = std::min<size_t>(pFirst, a), pLast = std::max<size_t>(pLast, b);
-			pRanges.emplace_back(a, b);
+			pRanges.push_back(detail::Range{ .first = a,.last = b });
 		}
-
-	public:
-		void _finalize() const {
-			std::vector<detail::Layer> temp;
-			detail::Builder{}.build(pRanges, temp);
-			detail::Renderer{}.draw(temp);
+		ascg::Graph finalize() const {
+			std::vector<detail::Layer> layers = detail::LayerGraph{}.build(pRanges);
+			return detail::Renderer{}.draw(layers);
 		}
 	};
 }
