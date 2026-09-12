@@ -14,8 +14,14 @@
 
 
 #include <ustring/ustring.h>
+/* add self-loops?/double-edges?/directions? */
+/* update grid width to be max-width+number max(crossings) over all transitions */
+
+
 
 namespace ascg {
+	static constexpr size_t NoNode = static_cast<size_t>(-1);
+
 	/*
 	*	Describes a layered graph made up of: # | - , '
 	*	The graph is bidirectional, and cannot contain self-loops.
@@ -26,12 +32,11 @@ namespace ascg {
 		/* separate rows of the ascii graph */
 		std::vector<std::string> rows;
 
-		/* mapping of each row to the node it belongs to with (size_t)-1 for intermediate rows */
+		/* mapping of each row to the node it belongs to with 'ascg::NoNode' for intermediate rows */
 		std::vector<size_t> map;
 	};
+	
 
-	/* fix add mapping */
-	/* add self-loops?/double-edges?/directions? */
 	namespace detail {
 		struct Range {
 			size_t first = 0;
@@ -815,6 +820,13 @@ namespace ascg {
 					output.rotate = rightMove;
 					output.leftRotate = false;
 				}
+
+				/* check if the rotation will also move the source index itself, in
+				*	which case it must be updated to mark the source after the shift */
+				if (output.target < output.index && !output.leftRotate && output.target + output.rotate > output.index)
+					++output.index;
+				else if (output.target > output.index && output.leftRotate && output.target - output.rotate < output.index)
+					--output.index;
 				return output;
 			}
 
@@ -854,6 +866,8 @@ namespace ascg {
 					std::swap(slice[swap->index], slice[swap->target]);
 				}
 
+
+				/* vvvv node-placement vvvv */
 				size_t otherNodeStart = 0, otherNodeSize = 0;
 				for (size_t i = 0; i < other.size(); ++i) {
 					if (otherNodeSize > 0) {
@@ -920,9 +934,9 @@ namespace ascg {
 						++isEnd;
 					}
 				}
+				/* ^^^^ node-placement ^^^^ */
 
-
-
+				/* vvvv layout-adjustments vvvv */
 				for (size_t i = 0; i < slice.size(); ++i) {
 					bool node = (i >= isStart && i < isEnd);
 					bool used = (slice[i].used);
@@ -941,12 +955,19 @@ namespace ascg {
 						--source;
 					}
 				}
+				/* ^^^^ layout-adjustments ^^^^ */
 			}
 
-			void fDrawRow(Row& row, ascg::Graph& graph) const {
+			void fDrawRow(Row& row, ascg::Graph& graph, size_t node) const {
+				/* update the mapping and allocate the next string line (as the graph will end in a node, each
+				*	node can just flush the map to the same size as the node, and the map will match in size) */
+				while (graph.map.size() < graph.rows.size())
+					graph.map.push_back(ascg::NoNode);
+				graph.map.push_back(node);
 				std::string& line = graph.rows.emplace_back();
 
-				/* iterate over the slots of the row and draw them to the string line */
+				/* iterate over the slots of the row and draw them to the string
+				*	line (with the double-extent to match the graph dimensions) */
 				for (size_t i = 0; i < row.size(); ++i) {
 					if (i > 0)
 						line.push_back((row[i - 1].kind == EntryKind::node && row[i].kind == EntryKind::node) ? '#' : ' ');
@@ -1091,7 +1112,7 @@ namespace ascg {
 				//}
 
 				for (size_t i = 0; i < grid.size(); ++i) {
-					fDrawRow(grid[i], graph);
+					fDrawRow(grid[i], graph, layers[i].index);
 					if (i + 1 < grid.size())
 						fDrawTransition(grid[i], graph);
 				}
@@ -1100,18 +1121,22 @@ namespace ascg {
 		};
 	}
 
-
+	/* collect all edges of the graph and convert them to a final graph (ranges must not include
+	*	ascg::NoNode as value and must not be identical, i.e. a connection to the same node) */
 	class Builder {
 	private:
 		std::vector<detail::Range> pRanges;
 
 	public:
 		void connect(size_t a, size_t b) {
+			/* ensure that the nodes are well ordered and considered valid */
 			if (a > b)
 				std::swap(a, b);
 			else if (a == b)
 				return;
-			pRanges.push_back(detail::Range{ .first = a,.last = b });
+
+			if (b < ascg::NoNode)
+				pRanges.push_back(detail::Range{ .first = a,.last = b });
 		}
 		ascg::Graph finalize() const {
 			std::vector<detail::Layer> layers = detail::LayerGraph{}.build(pRanges);
