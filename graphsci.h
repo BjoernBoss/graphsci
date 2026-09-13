@@ -35,7 +35,7 @@ namespace ascg {
 		/* mapping of each row to the node it belongs to with 'ascg::NoNode' for intermediate rows */
 		std::vector<size_t> map;
 	};
-	
+
 
 	namespace detail {
 		struct Range {
@@ -587,7 +587,7 @@ namespace ascg {
 				/* flood the entire grid to be rectangular (with one additional empty slot as swap space) */
 				size_t width = 0;
 				for (size_t i = 0; i < grid.size(); ++i)
-					width = std::max<size_t>(width, grid[i].size() + 1);
+					width = std::max<size_t>(width, grid[i].size() + 2);
 				for (Row& row : grid)
 					row.resize(width);
 			}
@@ -940,12 +940,13 @@ namespace ascg {
 				for (size_t i = 0; i < slice.size(); ++i) {
 					bool node = (i >= isStart && i < isEnd);
 					bool used = (slice[i].used);
+					EntryKind kind = (node ? EntryKind::node : (used ? EntryKind::traverse : EntryKind::empty));
 
-					if (node ? (other[i].kind == EntryKind::node) : (used == (forward ? other[i].hasEnd : other[i].hasStart)))
+					if (other[i].kind == kind)
 						continue;
 
 					size_t source = i + 1;
-					while (node ? (other[source].kind != EntryKind::node) : (used != (forward ? other[source].hasEnd : other[source].hasStart)))
+					while (other[source].kind != kind)
 						++source;
 					while (source > i) {
 						if (other[source].kind == EntryKind::empty)
