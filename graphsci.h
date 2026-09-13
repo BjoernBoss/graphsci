@@ -189,6 +189,7 @@ namespace ascg {
 			size_t index = 0;
 		};
 
+		static constexpr size_t SlotUnused = static_cast<size_t>(-1);
 		enum class EntryKind : uint8_t { empty, node, traverse };
 		struct Cell {
 			size_t start = 0;
@@ -664,37 +665,33 @@ namespace ascg {
 				}
 			}
 
-			struct Slot {
-				size_t target = 0;
-				bool used = false;
-			};
 			struct SwapMatch {
 				size_t index = 0;
 				size_t target = 0;
 				size_t rotate = 0;
 				bool leftRotate = false;
 			};
-			std::optional<SwapMatch> fFindNextSwap(std::vector<Slot>& slice) const {
+			std::optional<SwapMatch> fFindNextSwap(std::vector<size_t>& slice) const {
 				size_t bestIndex = 0, bestSkip = 0, bestTarget = 0;
 				bool bestCanMove = false, bestMoveLeft = false;
 
 				/* find the next entry which can already move or which has to move the furthest */
 				for (size_t i = 0; i < slice.size(); ++i) {
-					if (!slice[i].used)
+					if (slice[i] == detail::SlotUnused)
 						continue;
 					size_t leftSkip = 0, leftTarget = 0, rightSkip = 0, rightTarget = 0;
 
 					/* count the number of connections to skip to move it in order
 					*	and check if the entry is already positioned correctly */
 					for (size_t j = i; j > 0; --j) {
-						if (!slice[j - 1].used) continue;
-						if (slice[j - 1].target < slice[i].target) break;
+						if (slice[j - 1] == detail::SlotUnused) continue;
+						if (slice[j - 1] < slice[i]) break;
 						++leftSkip;
 						leftTarget = j - 1;
 					}
 					for (size_t j = i + 1; j < slice.size(); ++j) {
-						if (!slice[j].used) continue;
-						if (slice[j].target > slice[i].target) break;
+						if (slice[j] == detail::SlotUnused) continue;
+						if (slice[j] > slice[i]) break;
 						++rightSkip;
 						rightTarget = j;
 					}
@@ -702,8 +699,8 @@ namespace ascg {
 						continue;
 
 					/* check if any of the two positions can already move */
-					bool leftCanMove = (leftSkip > 0 && leftTarget > 0 && !slice[leftTarget - 1].used);
-					bool rightCanMove = (rightSkip > 0 && rightTarget + 1 < slice.size() && !slice[rightTarget + 1].used);
+					bool leftCanMove = (leftSkip > 0 && leftTarget > 0 && slice[leftTarget - 1] == detail::SlotUnused);
+					bool rightCanMove = (rightSkip > 0 && rightTarget + 1 < slice.size() && slice[rightTarget + 1] == detail::SlotUnused);
 
 					/* check if the left direction is better than the current best */
 					if (leftSkip > 0 && ((leftCanMove && !bestCanMove) || (leftCanMove == bestCanMove && leftSkip > bestSkip))) {
@@ -739,12 +736,12 @@ namespace ascg {
 				*	and count the number of moves it would require */
 				size_t leftMove = 0, rightMove = 0;
 				for (size_t i = bestTarget + 1; i < slice.size(); ++i) {
-					if (slice[i].used) continue;
+					if (slice[i] != detail::SlotUnused) continue;
 					rightMove = i - bestTarget;
 					break;
 				}
 				for (size_t i = bestTarget; i > 0; --i) {
-					if (slice[i - 1].used) continue;
+					if (slice[i - 1] != detail::SlotUnused) continue;
 					leftMove = bestTarget - i;
 					break;
 				}
@@ -770,36 +767,39 @@ namespace ascg {
 					--output.index;
 				return output;
 			}
+			std::vector<size_t> fMakeSlice(detail::Row& row, bool forward) const {
+				std::vector<size_t> slice;
+				slice.reserve(row.size());
 
+				/* iterate over the entries of the row, and create the slice of positions
+				*	representing the transitions moving away from one end of the row */
+				for (size_t i = 0; i < row.size(); ++i) {
+					if (forward && row[i].hasStart)
+						slice.push_back(row[i].start);
+					else if (!forward && row[i].hasEnd)
+						slice.push_back(row[i].end);
+					else
+						slice.push_back(detail::SlotUnused);
+				}
+				return slice;
+			}
 
 
 			void fUpdateAlignment(std::vector<detail::Row>& grid, size_t index, bool forward) const {
-				if (forward && index + 1 >= grid.size())
-					return;
-				if (!forward && index == 0)
+				if (forward ? (index + 1 >= grid.size()) : (index == 0))
 					return;
 				detail::Row& row = grid[index];
 				detail::Row& other = grid[forward ? index + 1 : index - 1];
 
-				std::vector<Slot> slice;
-				slice.reserve(row.size());
-
-				for (size_t i = 0; i < row.size(); ++i) {
-					if (forward && row[i].hasStart)
-						slice.push_back(Slot{ .target = row[i].start, .used = true });
-					else if (!forward && row[i].hasEnd)
-						slice.push_back(Slot{ .target = row[i].end, .used = true });
-					else
-						slice.push_back(Slot{});
-				}
-
+				/* create the initial slice and apply all necessary swappings to the slice */
+				std::vector<size_t> slice = fMakeSlice(row, forward);
 				while (true) {
 					/* find the next swap to be performed (if none has been found, the ordering is already correct) */
 					std::optional<SwapMatch> swap = fFindNextSwap(slice);
 					if (!swap.has_value())
 						break;
 
-					/* apply the rotation and the final move */
+					/* apply the rotation and the final swap-move */
 					if (swap->leftRotate) for (size_t i = swap->target - swap->rotate; i < swap->target; ++i)
 						std::swap(slice[i], slice[i + 1]);
 					else for (size_t i = swap->target + swap->rotate; i > swap->target; --i)
@@ -824,20 +824,20 @@ namespace ascg {
 
 				size_t isStart = 0, isEnd = 0;
 				while (otherNodeStart > 0) {
-					if (slice[isStart++].used)
+					if (slice[isStart++] != detail::SlotUnused)
 						--otherNodeStart;
 				}
 				isEnd = isStart;
-				while (isStart > 0 && (!slice[isStart - 1].used || other[slice[isStart - 1].target].kind == detail::EntryKind::node))
+				while (isStart > 0 && (slice[isStart - 1] == detail::SlotUnused || other[slice[isStart - 1]].kind == detail::EntryKind::node))
 					--isStart;
-				while (isEnd < slice.size() && (!slice[isEnd].used || other[slice[isEnd].target].kind == detail::EntryKind::node))
+				while (isEnd < slice.size() && (slice[isEnd] == detail::SlotUnused || other[slice[isEnd]].kind == detail::EntryKind::node))
 					++isEnd;
 
 				while (isEnd - isStart > otherNodeSize) {
 					size_t leftUsed = 0, rightUsed = 0;
-					while (slice[isStart + leftUsed].used)
+					while (slice[isStart + leftUsed] != detail::SlotUnused)
 						++leftUsed;
-					while (slice[isEnd - rightUsed - 1].used)
+					while (slice[isEnd - rightUsed - 1] != detail::SlotUnused)
 						++rightUsed;
 
 					if (leftUsed <= rightUsed) {
@@ -854,12 +854,12 @@ namespace ascg {
 				while (isEnd - isStart < otherNodeSize) {
 					size_t leftMove = 0, rightMove = 0;
 					for (size_t i = isStart; i > 0; --i) {
-						if (slice[i - 1].used) continue;
+						if (slice[i - 1] != detail::SlotUnused) continue;
 						leftMove = (isStart - i);
 						break;
 					}
 					for (size_t i = isEnd; i < slice.size(); ++i) {
-						if (slice[i].used) continue;
+						if (slice[i] != detail::SlotUnused) continue;
 						rightMove = (i - isEnd);
 						break;
 					}
@@ -880,7 +880,7 @@ namespace ascg {
 				/* vvvv layout-adjustments vvvv */
 				for (size_t i = 0; i < slice.size(); ++i) {
 					bool node = (i >= isStart && i < isEnd);
-					bool used = (slice[i].used);
+					bool used = (slice[i] != detail::SlotUnused);
 					detail::EntryKind kind = (node ? detail::EntryKind::node : (used ? detail::EntryKind::traverse : detail::EntryKind::empty));
 
 					if (other[i].kind == kind)
@@ -926,20 +926,14 @@ namespace ascg {
 			void fDrawTransition(detail::Row& row, ascg::Graph& graph) const {
 				size_t startOfLines = graph.rows.size();
 
-				std::vector<Slot> slice;
-				slice.reserve(row.size());
-				for (size_t i = 0; i < row.size(); ++i) {
-					if (row[i].hasStart)
-						slice.push_back(Slot{ .target = row[i].start, .used = true });
-					else
-						slice.push_back(Slot{});
-				}
+				/* construct the slice to propagate the changes through */
+				std::vector<size_t> slice = fMakeSlice(row, true);
 
 				const auto addTransitions = [&slice](size_t begin, size_t end, std::string& line) -> void {
 					for (size_t i = begin; i < end; ++i) {
 						if (i > 0)
 							line.push_back(' ');
-						line.push_back(slice[i].used ? '|' : ' ');
+						line.push_back(slice[i] == detail::SlotUnused ? ' ' : '|');
 					}
 				};
 
@@ -975,7 +969,7 @@ namespace ascg {
 						line.push_back(' ');
 					line.push_back((swap->index < swap->target) ? '\'' : ',');
 					for (size_t i = std::min<size_t>(swap->index, swap->target) + 1; i < std::max<size_t>(swap->index, swap->target); ++i)
-						line.append(slice[i].used ? "-|" : "--");
+						line.append(slice[i] == detail::SlotUnused ? "--" : "-|");
 					line.append((swap->index < swap->target) ? "-," : "-'");
 
 					std::swap(slice[swap->index], slice[swap->target]);
@@ -988,13 +982,13 @@ namespace ascg {
 					/* find the next mis-placed entry, which can be moved to its new placement */
 					size_t next = 0;
 					for (; next < slice.size(); ++next) {
-						if (!slice[next].used || slice[next].target == next)
+						if (slice[next] == detail::SlotUnused || slice[next] == next)
 							continue;
 
 						/* check if the entire range is usable */
 						bool blocked = false;
-						for (size_t i = std::min<size_t>(next, slice[next].target); i <= std::max<size_t>(next, slice[next].target); ++i) {
-							if (i == next || !slice[i].used)
+						for (size_t i = std::min<size_t>(next, slice[next]); i <= std::max<size_t>(next, slice[next]); ++i) {
+							if (i == next || slice[i] == detail::SlotUnused)
 								continue;
 							blocked = true;
 							break;
@@ -1012,8 +1006,8 @@ namespace ascg {
 					std::string& line = graph.rows.emplace_back();
 
 					/* fill in the intermediate slots */
-					size_t base = std::min<size_t>(next, slice[next].target);
-					size_t end = std::max<size_t>(next, slice[next].target);
+					size_t base = std::min<size_t>(next, slice[next]);
+					size_t end = std::max<size_t>(next, slice[next]);
 					addTransitions(0, base, line);
 
 					/* add the move itself */
@@ -1021,10 +1015,10 @@ namespace ascg {
 						line.push_back(' ');
 					line.push_back((base == next) ? '\'' : ',');
 					for (size_t i = base + 1; i < end; ++i)
-						line.append(slice[i].used ? "-|" : "--");
+						line.append(slice[i] == detail::SlotUnused ? "--" : "-|");
 					line.append((base == next) ? "-," : "-'");
 
-					size_t other = slice[next].target;
+					size_t other = slice[next];
 					std::swap(slice[other], slice[next]);
 					addTransitions(end + 1, slice.size(), line);
 				}
