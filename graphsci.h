@@ -675,6 +675,16 @@ namespace ascg {
 				size_t bestIndex = 0, bestSkip = 0, bestTarget = 0;
 				bool bestCanMove = false, bestMoveLeft = false;
 
+				/* helper to compare moves and decide which one leaves the slice in a
+				*	better state (assuming the can-move has already been decided) */
+				const auto testNextOption = [&bestSkip, &bestIndex, &bestTarget, &slice](size_t skip, size_t index, size_t target) -> bool {
+					if (skip != bestSkip)
+						return (skip > bestSkip);
+					size_t bDist = (slice[bestIndex] < bestTarget ? (bestTarget - slice[bestIndex]) : (slice[bestIndex] - bestTarget));
+					size_t nDist = (slice[index] < target ? (target - slice[index]) : (slice[index] - target));
+					return (nDist < bDist);
+				};
+
 				/* find the next entry which can already move or which has to move the furthest */
 				for (size_t i = 0; i < slice.size(); ++i) {
 					if (slice[i] == detail::SlotUnused)
@@ -703,7 +713,7 @@ namespace ascg {
 					bool rightCanMove = (rightSkip > 0 && rightTarget + 1 < slice.size() && slice[rightTarget + 1] == detail::SlotUnused);
 
 					/* check if the left direction is better than the current best */
-					if (leftSkip > 0 && ((leftCanMove && !bestCanMove) || (leftCanMove == bestCanMove && leftSkip > bestSkip))) {
+					if (leftSkip > 0 && ((leftCanMove && !bestCanMove) || (leftCanMove == bestCanMove && testNextOption(leftSkip, i, leftTarget)))) {
 						bestIndex = i;
 						bestSkip = leftSkip;
 						bestTarget = leftTarget;
@@ -712,7 +722,7 @@ namespace ascg {
 					}
 
 					/* check if the right direction is better than the current best */
-					if (rightSkip > 0 && ((rightCanMove && !bestCanMove) || (rightCanMove == bestCanMove && rightSkip > bestSkip))) {
+					if (rightSkip > 0 && ((rightCanMove && !bestCanMove) || (rightCanMove == bestCanMove && testNextOption(rightSkip, i, rightTarget)))) {
 						bestIndex = i;
 						bestSkip = rightSkip;
 						bestTarget = rightTarget;
@@ -1032,12 +1042,14 @@ namespace ascg {
 
 				fConstructGrid(layers, grid);
 
-				for (size_t i = 0; i < 4; ++i) {
-					for (size_t j = 0; j < grid.size(); ++j)
-						fUpdateAlignment(grid, j, true);
-					for (size_t j = grid.size(); j > 0; --j)
-						fUpdateAlignment(grid, j - 1, false);
-				}
+				//for (size_t i = 0; i < 40; ++i) {
+				//	for (size_t j = 0; j < grid.size(); ++j)
+				//		fUpdateAlignment(grid, j, true);
+				//	for (size_t j = grid.size(); j > 0; --j)
+				//		fUpdateAlignment(grid, j - 1, false);
+				//}
+				//for (size_t j = 0; j < grid.size(); ++j)
+				//	fUpdateAlignment(grid, j, true);
 
 
 				//for (size_t i = 0; i < 8; ++i) {
@@ -1053,6 +1065,353 @@ namespace ascg {
 						fDrawTransition(grid[i], graph);
 				}
 				return graph;
+			}
+		};
+
+		struct _Cell {
+			size_t index = ascg::NoNode;
+			size_t other = ascg::NoNode;
+			bool lineCrossing = false;
+			bool lineLeftRight = false;
+			bool lineTopBottom = false;
+			bool lineLeftTop = false;
+			bool lineLeftBottom = false;
+			bool lineRightTop = false;
+			bool lineRightBottom = false;
+			bool blockNode = false;
+		};
+		using _Row = std::vector<detail::_Cell>;
+
+		class _Renderer {
+		private:
+			std::vector<size_t> fConstructNode(const std::vector<detail::Layer>& layers, size_t index, std::vector<detail::_Row>& grid) const {
+				const detail::Layer& layer = layers[index];
+				detail::_Row& row = grid.emplace_back();
+				std::vector<size_t> slice;
+
+				/* helper to collect the endpoint ranges and sort them by their
+				*	other side (the other-side ordering is preserved into the grid) */
+				const auto sortEndpoints = [](const detail::Endpoints& eps) -> std::vector<size_t> {
+					const detail::Endpoint* list = eps.begin();
+					std::vector<size_t> out;
+
+					/* initially collect the indices and sort on them */
+					out.reserve(eps.size());
+					for (size_t i = 0; i < eps.size(); ++i)
+						out.push_back(i);
+					std::sort(out.begin(), out.end(), [list](size_t f, size_t s) -> bool {
+						return ((list[f].other != list[s].other) ? (list[f].other < list[s].other) : (f < s));
+					});
+
+					/* convert the indices back to the actual ranges */
+					for (size_t& val : out)
+						val = list[val].range;
+					return out;
+				};
+
+				/* iterate over the nodes and write them out to the grid and update the slice
+				*	simultaneously (initialize it with the range ids and resolve the indices later) */
+				for (size_t i = 0; i < layer.points.size(); ++i) {
+					const detail::Point& point = layer.points[i];
+
+					/* check if its a simple traversal */
+					if (const detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
+						row.push_back(detail::_Cell{ .index = traverse->range, .lineTopBottom = true });
+						slice.push_back(traverse->range);
+						continue;
+					}
+
+					/* insert all of the node points to the row */
+					const detail::Node& node = point.node();
+					for (size_t i = std::max<size_t>(node.start.size(), node.end.size()); i > 0; --i)
+						row.push_back(detail::_Cell{ .index = layer.index, .blockNode = true });
+
+					/* update the slice to contain the sorted ranges starting here and flush the remainder with empty spots */
+					for (size_t range : sortEndpoints(node.start))
+						slice.push_back(range);
+					while (slice.size() < row.size())
+						slice.push_back(ascg::NoNode);
+				}
+
+				/* check if the upcoming layer exists, in which case the ranges
+				*	in the slice need to be converted to actual indices */
+				if (index + 1 >= layers.size())
+					return slice;
+				const detail::Layer& next = layers[index + 1];
+
+				/* setup the map of ranges to indices in the next layer */
+				std::map<size_t, size_t> map;
+				size_t nextIndex = 0;
+				for (const detail::Point& point : next.points) {
+					if (const detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
+						map[traverse->range] = nextIndex++;
+						continue;
+					}
+
+					/* insert the nodes sorted by their range and skip the remaining
+					*	mandatory spacing indices for ranges starting at the next layer */
+					const detail::Node& node = point.node();
+					for (size_t range : sortEndpoints(node.end))
+						map[range] = nextIndex++;
+					if (node.start.size() > node.end.size())
+						nextIndex += (node.start.size() - node.end.size());
+				}
+
+				/* convert the ranges in the slice to the indices expected in the next row
+				*	and ensure the slcie is large enough to hold at least the target indices */
+				for (size_t& index : slice)
+					index = (index == ascg::NoNode ? detail::SlotUnused : map[index]);
+				while (slice.size() < nextIndex)
+					slice.push_back(detail::SlotUnused);
+				return slice;
+			}
+			void fConstructTransitions(std::vector<detail::_Row>& grid, std::vector<size_t>& slice) const {
+				size_t numberOfRows = grid.size();
+
+				/* helper method to write any basic traversals between [begin, end)
+				*	out and to add rotations (begin being moved to target) */
+				const auto addTraversals = [&slice, &grid](size_t begin, size_t end) -> void {
+					detail::_Row& row = grid.back();
+
+					for (size_t i = begin; i < end; ++i) {
+						if (slice[i] == detail::SlotUnused)
+							row.push_back(detail::_Cell{});
+						else
+							row.push_back(detail::_Cell{ .index = slice[i], .lineTopBottom = true });
+					}
+				};
+				const auto addRotation = [&slice, &grid, &addTraversals](size_t begin, size_t end, size_t target) -> void {
+					if (begin == target) return;
+					bool leftwards = (target < begin);
+					size_t distance = (leftwards ? (begin - target) : (target - begin));
+
+					/* iterate until no more entries need to be moved */
+					while (begin != end) {
+						detail::_Row& row = grid.emplace_back();
+
+						/* add all traversals before the next rotation */
+						addTraversals(0, (leftwards ? begin - distance : end - 1));
+
+						/* add the next rotation itself */
+						size_t range = slice[leftwards ? begin : end - 1];
+						row.push_back(detail::_Cell{ .index = range, .lineRightTop = !leftwards, .lineRightBottom = leftwards });
+						for (size_t i = 1; i < distance; ++i)
+							row.push_back(detail::_Cell{ .index = range, .lineLeftRight = true });
+						row.push_back(detail::_Cell{ .index = range, .lineLeftTop = leftwards, .lineLeftBottom = !leftwards });
+
+						/* add the traversals after the rotation and update the slice itself and the indices */
+						addTraversals((leftwards ? begin + 1 : end + distance), slice.size());
+						if (leftwards) {
+							std::swap(slice[begin], slice[begin - distance]);
+							++begin;
+						}
+						else {
+							--end;
+							std::swap(slice[end], slice[end + distance]);
+						}
+					}
+				};
+				const auto addCrossing = [&slice, &grid, &addTraversals](size_t index, size_t target) -> void {
+					detail::_Row& row = grid.emplace_back();
+					bool leftwards = (target < index);
+
+					/* add the traversals before the crossing */
+					addTraversals(0, std::min<size_t>(index, target));
+
+					/* add the crossing itself */
+					size_t range = slice[index];
+					row.push_back(detail::_Cell{ .index = range, .lineRightTop = !leftwards, .lineRightBottom = leftwards });
+					for (size_t i = std::min<size_t>(index, target) + 1; i < std::max<size_t>(index, target); ++i) {
+						if (slice[i] == detail::SlotUnused)
+							row.push_back(detail::_Cell{ .index = range, .lineLeftRight = true });
+						else
+							row.push_back(detail::_Cell{ .index = slice[i], .other = range, .lineCrossing = true });
+					}
+					row.push_back(detail::_Cell{ .index = range, .lineLeftTop = leftwards, .lineLeftBottom = !leftwards });
+
+					/* add the traversals after the crossing and update the slice itself */
+					addTraversals(std::max<size_t>(index, target) + 1, slice.size());
+					std::swap(slice[index], slice[target]);
+				};
+
+				/* add all rotations and swaps to ensure the slice is in order */
+				while (true) {
+					size_t bestIndex = 0, bestSkip = 0, bestTarget = 0;
+					bool bestCanMove = false, bestMoveLeft = false;
+
+					/* find the next entry which can already move or which has to move the furthest */
+					for (size_t i = 0; i < slice.size(); ++i) {
+						if (slice[i] == detail::SlotUnused)
+							continue;
+						size_t leftSkip = 0, leftTarget = 0, rightSkip = 0, rightTarget = 0;
+
+						/* count the number of connections to skip to move it in order
+						*	and check if the entry is already positioned correctly */
+						for (size_t j = i; j > 0; --j) {
+							if (slice[j - 1] == detail::SlotUnused) continue;
+							if (slice[j - 1] < slice[i]) break;
+							++leftSkip;
+							leftTarget = j - 1;
+						}
+						for (size_t j = i + 1; j < slice.size(); ++j) {
+							if (slice[j] == detail::SlotUnused) continue;
+							if (slice[j] > slice[i]) break;
+							++rightSkip;
+							rightTarget = j;
+						}
+						if (leftSkip == 0 && rightSkip == 0)
+							continue;
+
+						/* check if the left direction is better than the current best */
+						if (leftSkip > bestSkip) {
+							bestIndex = i;
+							bestSkip = leftSkip;
+							bestTarget = leftTarget;
+							bestMoveLeft = true;
+						}
+
+						/* check if the right direction is better than the current best */
+						if (rightSkip > bestSkip) {
+							bestIndex = i;
+							bestSkip = rightSkip;
+							bestTarget = rightTarget;
+							bestMoveLeft = false;
+						}
+					}
+
+					/* check if no swap was found or if it can be moved immediately */
+					if (bestSkip == 0)
+						break;
+					bestCanMove = (bestMoveLeft ? (bestTarget > 0 && slice[bestTarget - 1] == detail::SlotUnused) : (bestTarget + 1 < slice.size() && slice[bestTarget + 1] == detail::SlotUnused));
+					if (bestCanMove) {
+						addCrossing(bestIndex, (bestMoveLeft ? bestTarget - 1 : bestTarget + 1));
+						continue;
+					}
+
+					/* shift the target for right movements, as this reduces the off-by-one patching for the upcoming loops */
+					if (!bestMoveLeft)
+						++bestTarget;
+
+					/* find the next possible empty slot in either direction, and count the number of
+					*	moves it would require (on the right side, there are more implicit free slots) */
+					size_t leftMove = 0, rightMove = 0;
+					for (size_t i = bestTarget + 1; i <= slice.size(); ++i) {
+						if (i < slice.size() && slice[i] != detail::SlotUnused) continue;
+						rightMove = i - bestTarget;
+						break;
+					}
+					for (size_t i = bestTarget; i > 0; --i) {
+						if (slice[i - 1] != detail::SlotUnused) continue;
+						leftMove = bestTarget - i;
+						break;
+					}
+
+					/* check if the left empty slot should be used and add the necessary rotations and patch the indices accordingly */
+					if ((leftMove > 0 && leftMove <= rightMove) || rightMove == 0) {
+						addRotation(bestTarget - leftMove, bestTarget, bestTarget - leftMove - 1);
+						--bestTarget;
+						if (bestTarget > bestIndex && bestTarget - leftMove < bestIndex)
+							--bestIndex;
+					}
+
+					/* apply the rotation to the right and patch the indices accordingly (right side might require an implicit new entry) */
+					else {
+						if (bestTarget + rightMove == slice.size())
+							slice.push_back(detail::SlotUnused);
+						addRotation(bestTarget, bestTarget + rightMove, bestTarget + 1);
+						if (bestTarget < bestIndex && bestTarget + rightMove > bestIndex)
+							++bestIndex;
+					}
+
+					/* apply the final actual crossing */
+					addCrossing(bestIndex, bestTarget);
+				}
+
+				/* find the next mis-placed entry, which can be moved to its new placement (loop until they have all been moved) */
+				for (size_t i = 0; i < slice.size();) {
+					if (slice[i] == detail::SlotUnused || slice[i] == i) {
+						++i;
+						continue;
+					}
+
+					/* check if the entire range is free for the slice slot to be rotated into place */
+					bool blocked = false;
+					for (size_t j = std::min<size_t>(i, slice[i]); j <= std::max<size_t>(i, slice[i]); ++j) {
+						if (j == i || slice[j] == detail::SlotUnused)
+							continue;
+						blocked = true;
+						break;
+					}
+
+					/* apply the rotation and update the indices */
+					if (blocked)
+						++i;
+					else {
+						addRotation(i, i + 1, slice[i]);
+						i = 0;
+					}
+				}
+
+				/* check if no more mis-placed entries have been found (all slices are already well ordered)
+				*	and ensure that at least one row was added, as otherwise two nodes may directly touch */
+				if (numberOfRows == grid.size())
+					addTraversals(0, slice.size());
+			}
+			void fPrintGrid(const std::vector<detail::_Row>& grid) const {
+				for (const detail::_Row& row : grid) {
+					std::string line;
+					for (const detail::_Cell& cell : row) {
+						if (!line.empty()) {
+							if (cell.blockNode)
+								line.push_back('#');
+							else if (cell.lineCrossing || cell.lineLeftRight || cell.lineLeftTop || cell.lineLeftBottom)
+								line.push_back('-');
+							else
+								line.push_back(' ');
+						}
+
+						if (cell.blockNode)
+							line.push_back('#');
+						else if (cell.lineCrossing || cell.lineTopBottom)
+							line.push_back('|');
+						else if (cell.lineLeftTop || cell.lineRightTop)
+							line.push_back('\'');
+						else if (cell.lineLeftBottom || cell.lineRightBottom)
+							line.push_back(',');
+						else if (cell.lineLeftRight)
+							line.push_back('-');
+						else
+							line.push_back(' ');
+					}
+
+					str::PrintLn(line);
+				}
+			}
+
+			void fConstructGrid(const std::vector<detail::Layer>& layers, std::vector<detail::_Row>& grid) const {
+
+				std::vector<size_t> slice;
+				for (size_t i = 0; i < layers.size(); ++i) {
+					if (i > 0)
+						fConstructTransitions(grid, slice);
+					slice = fConstructNode(layers, i, grid);
+				}
+
+
+				/* flood the entire grid to be rectangular (with one additional empty slot as swap space) */
+				size_t width = 0;
+				for (size_t i = 0; i < grid.size(); ++i)
+					width = std::max<size_t>(width, grid[i].size() + 2);
+				for (detail::_Row& row : grid)
+					row.resize(width);
+
+				fPrintGrid(grid);
+			}
+
+		public:
+			void draw(const std::vector<detail::Layer>& layers) const {
+				std::vector<detail::_Row> grid;
+				fConstructGrid(layers, grid);
 			}
 		};
 	}
@@ -1076,6 +1435,7 @@ namespace ascg {
 		}
 		ascg::Graph finalize() const {
 			std::vector<detail::Layer> layers = detail::LayerGraph{}.build(pRanges);
+			detail::_Renderer{}.draw(layers);
 			return detail::Renderer{}.draw(layers);
 		}
 	};
