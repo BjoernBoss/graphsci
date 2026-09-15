@@ -14,8 +14,20 @@
 
 
 #include <ustring/ustring.h>
-/* add self-loops?/double-edges?/directions? */
-/* update grid width to be max-width+number max(crossings) over all transitions */
+/*
+*	add self-loops?/double-edges?/directions?
+*	update grid width to be max-width+number max(crossings) over all transitions
+*
+*	merge min-max-walk skip option?
+*	can _Renderer algorithm introduce new crossings? (Prevent!)
+*	update detail::LayoutGraph to default offset preferred positions to be centered
+*
+*	index/other of _Cell are currently not being updated! (remove them?)
+*
+*	shrink horizontally
+*	shrink vertically
+*	straighten up any lines
+*/
 
 
 
@@ -38,6 +50,38 @@ namespace ascg {
 
 
 	namespace detail {
+		struct MinMaxWalk {
+		public:
+			struct Iterator {
+				size_t index = 0;
+				size_t operator*() const { return index; }
+				Iterator& operator++() { ++index; return *this; }
+				bool operator==(Iterator other) const { return index == other.index; }
+				bool operator!=(Iterator other) const { return !(*this == other); }
+			};
+
+		public:
+			size_t first = 0;
+			size_t last = 0;
+
+		public:
+			MinMaxWalk(size_t a, size_t b, bool skipFirst, bool skipLast) : first{ std::min(a, b) }, last{ std::max(a, b) } {
+				if (skipFirst)
+					++first;
+				if (skipLast) {
+					if (first < last)
+						--last;
+					else
+						++first;
+				}
+			}
+			Iterator begin() const { return Iterator{ first }; };
+			Iterator end() const { return Iterator{ last + 1 }; };
+		};
+		inline size_t Towards(size_t value, size_t other, size_t step = 1) {
+			return (value < other ? value + step : value - step);
+		}
+
 		struct Range {
 			size_t first = 0;
 			size_t last = 0;
@@ -1068,17 +1112,48 @@ namespace ascg {
 			}
 		};
 
+		enum class _CellKind : uint8_t {
+			empty,
+			node,
+			crossing,
+			leftRight,
+			topBottom,
+			leftTop,
+			leftBottom,
+			rightTop,
+			rightBottom
+		};
 		struct _Cell {
 			size_t index = ascg::NoNode;
 			size_t other = ascg::NoNode;
-			bool lineCrossing = false;
-			bool lineLeftRight = false;
-			bool lineTopBottom = false;
-			bool lineLeftTop = false;
-			bool lineLeftBottom = false;
-			bool lineRightTop = false;
-			bool lineRightBottom = false;
-			bool blockNode = false;
+			detail::_CellKind kind = detail::_CellKind::empty;
+			bool anyLeft() const {
+				return (kind == detail::_CellKind::crossing || kind == detail::_CellKind::leftTop || kind == detail::_CellKind::leftRight || kind == detail::_CellKind::leftBottom);
+			}
+			bool cornerLeft() const {
+				return (kind == detail::_CellKind::leftTop || kind == detail::_CellKind::leftBottom);
+			}
+			bool cornerRight() const {
+				return (kind == detail::_CellKind::rightTop || kind == detail::_CellKind::rightBottom);
+			}
+			bool cornerTop() const {
+				return (kind == detail::_CellKind::leftTop || kind == detail::_CellKind::rightTop);
+			}
+			bool cornerBottom() const {
+				return (kind == detail::_CellKind::leftBottom || kind == detail::_CellKind::rightBottom);
+			}
+			bool lineHorizontal() const {
+				return (kind == detail::_CellKind::crossing || kind == detail::_CellKind::leftRight);
+			}
+			bool lineVertical() const {
+				return (kind == detail::_CellKind::crossing || kind == detail::_CellKind::topBottom);
+			}
+			bool freeHorizontal() const {
+				return (kind == detail::_CellKind::empty || kind == detail::_CellKind::topBottom);
+			}
+			bool freeVertical() const {
+				return (kind == detail::_CellKind::empty || kind == detail::_CellKind::leftRight);
+			}
 		};
 		using _Row = std::vector<detail::_Cell>;
 
@@ -1116,7 +1191,7 @@ namespace ascg {
 
 					/* check if its a simple traversal */
 					if (const detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
-						row.push_back(detail::_Cell{ .index = traverse->range, .lineTopBottom = true });
+						row.push_back(detail::_Cell{ .index = traverse->range, .kind = detail::_CellKind::topBottom });
 						slice.push_back(traverse->range);
 						continue;
 					}
@@ -1124,7 +1199,7 @@ namespace ascg {
 					/* insert all of the node points to the row */
 					const detail::Node& node = point.node();
 					for (size_t i = std::max<size_t>(node.start.size(), node.end.size()); i > 0; --i)
-						row.push_back(detail::_Cell{ .index = layer.index, .blockNode = true });
+						row.push_back(detail::_Cell{ .index = layer.index, .kind = detail::_CellKind::node });
 
 					/* update the slice to contain the sorted ranges starting here and flush the remainder with empty spots */
 					for (size_t range : sortEndpoints(node.start))
@@ -1177,7 +1252,7 @@ namespace ascg {
 						if (slice[i] == detail::SlotUnused)
 							row.push_back(detail::_Cell{});
 						else
-							row.push_back(detail::_Cell{ .index = slice[i], .lineTopBottom = true });
+							row.push_back(detail::_Cell{ .index = slice[i], .kind = detail::_CellKind::topBottom });
 					}
 				};
 				const auto addRotation = [&slice, &grid, &addTraversals](size_t begin, size_t end, size_t target) -> void {
@@ -1194,10 +1269,10 @@ namespace ascg {
 
 						/* add the next rotation itself */
 						size_t range = slice[leftwards ? begin : end - 1];
-						row.push_back(detail::_Cell{ .index = range, .lineRightTop = !leftwards, .lineRightBottom = leftwards });
+						row.push_back(detail::_Cell{ .index = range, .kind = (leftwards ? detail::_CellKind::rightBottom : detail::_CellKind::rightTop) });
 						for (size_t i = 1; i < distance; ++i)
-							row.push_back(detail::_Cell{ .index = range, .lineLeftRight = true });
-						row.push_back(detail::_Cell{ .index = range, .lineLeftTop = leftwards, .lineLeftBottom = !leftwards });
+							row.push_back(detail::_Cell{ .index = range, .kind = detail::_CellKind::leftRight });
+						row.push_back(detail::_Cell{ .index = range, .kind = (leftwards ? detail::_CellKind::leftTop : detail::_CellKind::leftBottom) });
 
 						/* add the traversals after the rotation and update the slice itself and the indices */
 						addTraversals((leftwards ? begin + 1 : end + distance), slice.size());
@@ -1220,14 +1295,14 @@ namespace ascg {
 
 					/* add the crossing itself */
 					size_t range = slice[index];
-					row.push_back(detail::_Cell{ .index = range, .lineRightTop = !leftwards, .lineRightBottom = leftwards });
-					for (size_t i = std::min<size_t>(index, target) + 1; i < std::max<size_t>(index, target); ++i) {
+					row.push_back(detail::_Cell{ .index = range, .kind = (leftwards ? detail::_CellKind::rightBottom : detail::_CellKind::rightTop) });
+					for (size_t i : detail::MinMaxWalk{ index, target, true, true }) {
 						if (slice[i] == detail::SlotUnused)
-							row.push_back(detail::_Cell{ .index = range, .lineLeftRight = true });
+							row.push_back(detail::_Cell{ .index = range, .kind = detail::_CellKind::leftRight });
 						else
-							row.push_back(detail::_Cell{ .index = slice[i], .other = range, .lineCrossing = true });
+							row.push_back(detail::_Cell{ .index = slice[i], .other = range, .kind = detail::_CellKind::crossing });
 					}
-					row.push_back(detail::_Cell{ .index = range, .lineLeftTop = leftwards, .lineLeftBottom = !leftwards });
+					row.push_back(detail::_Cell{ .index = range, .kind = (leftwards ? detail::_CellKind::leftTop : detail::_CellKind::leftBottom) });
 
 					/* add the traversals after the crossing and update the slice itself */
 					addTraversals(std::max<size_t>(index, target) + 1, slice.size());
@@ -1336,7 +1411,7 @@ namespace ascg {
 
 					/* check if the entire range is free for the slice slot to be rotated into place */
 					bool blocked = false;
-					for (size_t j = std::min<size_t>(i, slice[i]); j <= std::max<size_t>(i, slice[i]); ++j) {
+					for (size_t j : detail::MinMaxWalk{ i, slice[i], false, false }) {
 						if (j == i || slice[j] == detail::SlotUnused)
 							continue;
 						blocked = true;
@@ -1360,32 +1435,133 @@ namespace ascg {
 			void fPrintGrid(const std::vector<detail::_Row>& grid) const {
 				for (const detail::_Row& row : grid) {
 					std::string line;
-					for (const detail::_Cell& cell : row) {
-						if (!line.empty()) {
-							if (cell.blockNode)
+					for (size_t i = 0; i < row.size(); ++i) {
+						const detail::_Cell& cell = row[i];
+
+						if (i > 0) {
+							if (cell.kind == detail::_CellKind::node && row[i - 1].kind == cell.kind)
 								line.push_back('#');
-							else if (cell.lineCrossing || cell.lineLeftRight || cell.lineLeftTop || cell.lineLeftBottom)
+							else if (cell.anyLeft())
 								line.push_back('-');
 							else
 								line.push_back(' ');
 						}
 
-						if (cell.blockNode)
+						if (cell.kind == detail::_CellKind::node)
 							line.push_back('#');
-						else if (cell.lineCrossing || cell.lineTopBottom)
+						else if (cell.lineVertical())
 							line.push_back('|');
-						else if (cell.lineLeftTop || cell.lineRightTop)
+						else if (cell.cornerTop())
 							line.push_back('\'');
-						else if (cell.lineLeftBottom || cell.lineRightBottom)
+						else if (cell.cornerBottom())
 							line.push_back(',');
-						else if (cell.lineLeftRight)
+						else if (cell.kind == detail::_CellKind::leftRight)
 							line.push_back('-');
 						else
 							line.push_back(' ');
 					}
 
-					str::PrintLn(line);
+					str::PrintLn('[', line, ']');
 				}
+			}
+
+			bool fStraightenGraph(std::vector<detail::_Row>& grid) const {
+				/* helper to remove a 'z' clipped corner rectangle */
+				const auto removeCornerRectangle = [&grid](size_t x, size_t y, size_t xCorner, size_t yCorner) -> bool {
+					/* check if the extension of the horizontal axis at the crossing to the new corner is free */
+					for (size_t i : detail::MinMaxWalk{ x, detail::Towards(xCorner, x), false, false }) {
+						if (!grid[yCorner][i].freeHorizontal())
+							return false;
+					}
+
+					/* check if the extension of the original axis can freely get next to the corner */
+					for (size_t i : detail::MinMaxWalk{ yCorner, detail::Towards(y, yCorner), false, false }) {
+						if (!grid[i][x].freeVertical())
+							return false;
+					}
+
+					/* erase the old horizontal and vertical lines and insert the new ones */
+					for (size_t i : detail::MinMaxWalk{ xCorner, detail::Towards(x, xCorner), false, false }) {
+						grid[y][i].kind = (grid[y][i].kind == detail::_CellKind::crossing ? detail::_CellKind::topBottom : detail::_CellKind::empty);
+						grid[yCorner][i].kind = (grid[yCorner][i].kind == detail::_CellKind::topBottom ? detail::_CellKind::crossing : detail::_CellKind::leftRight);
+					}
+					for (size_t i : detail::MinMaxWalk{ y, yCorner, true, true }) {
+						grid[i][xCorner].kind = (grid[i][xCorner].kind == detail::_CellKind::crossing ? detail::_CellKind::leftRight : detail::_CellKind::empty);
+						grid[i][x].kind = (grid[i][x].kind == detail::_CellKind::leftRight ? detail::_CellKind::crossing : detail::_CellKind::topBottom);
+					}
+
+					/* move the new corner over */
+					grid[yCorner][x] = grid[y][x];
+					grid[y][x].kind = detail::_CellKind::topBottom;
+					return true;
+				};
+
+				/* helper to move the endpoint position on a node */
+				const auto moveNodeBend = [&grid](size_t x, size_t y, size_t xCorner, size_t yCorner) -> bool {
+					size_t target = xCorner;
+
+					/* count the number of empty spots by which the final line can be moved */
+					while (target != x) {
+						size_t next = detail::Towards(target, x);
+
+						/* check if the entire strand is still part of the node and is free to be used */
+						if (grid[yCorner][next].kind != detail::_CellKind::node)
+							break;
+						bool free = true;
+						for (size_t i : detail::MinMaxWalk{ y, yCorner, true, true }) {
+							if (!(free = grid[i][next].freeVertical()))
+								break;
+						}
+
+						/* check if the entire range is free and usable and update the index */
+						if (!free)
+							break;
+						target = next;
+					}
+
+					/* check if no actual suitable movement was found */
+					if (target == xCorner)
+						return false;
+
+					/* erase the old vertical and horizontal lines and insert the new one */
+					for (size_t i : detail::MinMaxWalk{ y, yCorner, true, true }) {
+						grid[i][xCorner].kind = (grid[i][xCorner].kind == detail::_CellKind::crossing ? detail::_CellKind::leftRight : detail::_CellKind::empty);
+						grid[i][target].kind = (grid[i][target].kind == detail::_CellKind::leftRight ? detail::_CellKind::crossing : detail::_CellKind::topBottom);
+					}
+					for (size_t i : detail::MinMaxWalk{ x, xCorner, true, true })
+						grid[y][i].kind = (grid[y][i].kind == detail::_CellKind::crossing ? detail::_CellKind::topBottom : detail::_CellKind::empty);
+
+					/* move the new corner over */
+					grid[y][target].kind = (target == x ? detail::_CellKind::topBottom : grid[y][xCorner].kind);
+					grid[y][xCorner].kind = detail::_CellKind::empty;
+					return true;
+				};
+
+				/* find the next corner to pursue (iterate until one has been found or all have been checked */
+				for (size_t y = 0; y < grid.size(); ++y) {
+					detail::_Row& row = grid[y];
+					for (size_t x = 0; x < row.size(); ++x) {
+						detail::_Cell& cell = row[x];
+						if (!cell.cornerLeft() && !cell.cornerRight())
+							continue;
+
+						/* ensure that the range forms the 'z' form and find the other end of the range corner */
+						size_t xCorner = x, yCorner = y;
+						if (cell.cornerLeft()) while (grid[yCorner][--xCorner].lineHorizontal());
+						else while (grid[yCorner][++xCorner].lineHorizontal());
+						if (cell.cornerTop() == grid[yCorner][xCorner].cornerTop())
+							continue;
+						if (cell.cornerTop()) while (grid[++yCorner][xCorner].lineVertical());
+						else while (grid[--yCorner][xCorner].lineVertical());
+
+						/* check if its a proper corner rectangle or if it reached a node and the endpoint can be moved */
+						if (grid[yCorner][xCorner].kind == cell.kind && removeCornerRectangle(x, y, xCorner, yCorner))
+							return true;
+						else if (grid[yCorner][xCorner].kind == detail::_CellKind::node && moveNodeBend(x, y, xCorner, yCorner))
+							return true;
+					}
+				}
+				return false;
 			}
 
 			void fConstructGrid(const std::vector<detail::Layer>& layers, std::vector<detail::_Row>& grid) const {
@@ -1401,17 +1577,19 @@ namespace ascg {
 				/* flood the entire grid to be rectangular (with one additional empty slot as swap space) */
 				size_t width = 0;
 				for (size_t i = 0; i < grid.size(); ++i)
-					width = std::max<size_t>(width, grid[i].size() + 2);
+					width = std::max<size_t>(width, grid[i].size());
 				for (detail::_Row& row : grid)
 					row.resize(width);
-
-				fPrintGrid(grid);
 			}
 
 		public:
 			void draw(const std::vector<detail::Layer>& layers) const {
 				std::vector<detail::_Row> grid;
 				fConstructGrid(layers, grid);
+
+				while (fStraightenGraph(grid));
+
+				fPrintGrid(grid);
 			}
 		};
 	}
