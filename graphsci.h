@@ -4,6 +4,7 @@
 #include <vector>
 #include <cinttypes>
 #include <algorithm>
+#include <ranges>
 #include <set>
 #include <map>
 #include <utility>
@@ -33,6 +34,7 @@
 
 
 namespace ascg {
+	/* invalid value for normal node indices; used to identify intermediate rows in the 'ascg::Graph' */
 	static constexpr size_t NoNode = static_cast<size_t>(-1);
 
 	/*
@@ -1128,14 +1130,11 @@ namespace ascg {
 			size_t index = ascg::NoNode;
 			size_t other = ascg::NoNode;
 			detail::_CellKind kind = detail::_CellKind::empty;
-			bool anyLeft() const {
-				return (kind == detail::_CellKind::crossing || kind == detail::_CellKind::leftTop || kind == detail::_CellKind::horizontal || kind == detail::_CellKind::leftBottom);
-			}
-			bool anyCorner() const {
-				return (kind == detail::_CellKind::leftTop || kind == detail::_CellKind::leftBottom || kind == detail::_CellKind::rightTop || kind == detail::_CellKind::rightBottom);
-			}
 			bool cornerLeft() const {
 				return (kind == detail::_CellKind::leftTop || kind == detail::_CellKind::leftBottom);
+			}
+			bool cornerRight() const {
+				return (kind == detail::_CellKind::rightTop || kind == detail::_CellKind::rightBottom);
 			}
 			bool cornerTop() const {
 				return (kind == detail::_CellKind::leftTop || kind == detail::_CellKind::rightTop);
@@ -1148,6 +1147,18 @@ namespace ascg {
 			}
 			bool lineVertical() const {
 				return (kind == detail::_CellKind::crossing || kind == detail::_CellKind::vertical);
+			}
+			bool anyLeft() const {
+				return (cornerLeft() || lineHorizontal());
+			}
+			bool anyTop() const {
+				return (cornerTop() || lineVertical());
+			}
+			bool anyBottom() const {
+				return (cornerBottom() || lineVertical());
+			}
+			bool anyCorner() const {
+				return (cornerLeft() || cornerRight());
 			}
 			bool freeHorizontal() const {
 				return (kind == detail::_CellKind::empty || kind == detail::_CellKind::vertical);
@@ -1183,6 +1194,76 @@ namespace ascg {
 
 		class _Renderer {
 		private:
+			void fFillTraversals(detail::_Row& row, std::vector<size_t>& slice, size_t begin, size_t end) const {
+				for (size_t i = begin; i < end; ++i) {
+					if (slice[i] == detail::SlotUnused)
+						row.push_back(detail::_Cell{});
+					else
+						row.push_back(detail::_Cell{ .index = slice[i], .kind = detail::_CellKind::vertical });
+				}
+			}
+			size_t fInsertRotation(std::vector<detail::_Row>& grid, std::vector<size_t>& slice, size_t begin, size_t end, size_t target, size_t where) const {
+				/* add the rotation of the range [begin, end) with begin finally being placed at target */
+				if (begin == target) return where;
+				bool leftwards = (target < begin);
+				size_t distance = (leftwards ? (begin - target) : (target - begin));
+
+				/* iterate until no more entries need to be moved */
+				while (begin != end) {
+					detail::_Row& row = *grid.emplace(grid.begin() + where++);
+
+					/* add all traversals before the next rotation */
+					fFillTraversals(row, slice, 0, (leftwards ? begin - distance : end - 1));
+
+					/* add the next rotation itself */
+					size_t range = slice[leftwards ? begin : end - 1];
+					row.push_back(detail::_Cell{ .index = range, .kind = (leftwards ? detail::_CellKind::rightBottom : detail::_CellKind::rightTop) });
+					for (size_t i = 1; i < distance; ++i)
+						row.push_back(detail::_Cell{ .index = range, .kind = detail::_CellKind::horizontal });
+					row.push_back(detail::_Cell{ .index = range, .kind = (leftwards ? detail::_CellKind::leftTop : detail::_CellKind::leftBottom) });
+
+					/* add the traversals after the rotation and update the slice itself and the indices */
+					fFillTraversals(row, slice, (leftwards ? begin + 1 : end + distance), slice.size());
+					if (leftwards) {
+						std::swap(slice[begin], slice[begin - distance]);
+						++begin;
+					}
+					else {
+						--end;
+						std::swap(slice[end], slice[end + distance]);
+					}
+				}
+				return where;
+			}
+			size_t fInsertSliceCorrections(std::vector<detail::_Row>& grid, std::vector<size_t>& slice, size_t where) const {
+				/* find the next misplaced entry, which can be moved to its new placement (loop until they have all
+				*	been moved; must always find one, as the caller guarantees that the slice targets are possible) */
+				for (size_t i = 0; i < slice.size();) {
+					if (slice[i] == detail::SlotUnused || slice[i] == i) {
+						++i;
+						continue;
+					}
+
+					/* check if the entire range is free for the slice slot to be rotated into place */
+					bool blocked = false;
+					for (size_t j : detail::MinMaxWalk{ i, slice[i], false, false }) {
+						if (j == i || slice[j] == detail::SlotUnused)
+							continue;
+						blocked = true;
+						break;
+					}
+
+					/* apply the rotation, if its not blocked, and update the indices */
+					if (blocked)
+						++i;
+					else {
+						where = fInsertRotation(grid, slice, i, i + 1, slice[i], where);
+						i = 0;
+					}
+				}
+				return where;
+			}
+
 			std::vector<size_t> fConstructNode(const std::vector<detail::Layer>& layers, size_t index, std::vector<detail::_Row>& grid) const {
 				const detail::Layer& layer = layers[index];
 				detail::_Row& row = grid.emplace_back();
@@ -1264,55 +1345,12 @@ namespace ascg {
 					slice.push_back(detail::SlotUnused);
 				return slice;
 			}
-			void fConstructAddTraversals(std::vector<detail::_Row>& grid, std::vector<size_t>& slice, size_t begin, size_t end) const {
-				detail::_Row& row = grid.back();
-
-				/* add the intermediate cells to the already existing row */
-				for (size_t i = begin; i < end; ++i) {
-					if (slice[i] == detail::SlotUnused)
-						row.push_back(detail::_Cell{});
-					else
-						row.push_back(detail::_Cell{ .index = slice[i], .kind = detail::_CellKind::vertical });
-				}
-			}
-			void fConstructAddRotation(std::vector<detail::_Row>& grid, std::vector<size_t>& slice, size_t begin, size_t end, size_t target) const {
-				/* add the rotation of the range [begin, end) with begin finally being placed at target */
-				if (begin == target) return;
-				bool leftwards = (target < begin);
-				size_t distance = (leftwards ? (begin - target) : (target - begin));
-
-				/* iterate until no more entries need to be moved */
-				while (begin != end) {
-					detail::_Row& row = grid.emplace_back();
-
-					/* add all traversals before the next rotation */
-					fConstructAddTraversals(grid, slice, 0, (leftwards ? begin - distance : end - 1));
-
-					/* add the next rotation itself */
-					size_t range = slice[leftwards ? begin : end - 1];
-					row.push_back(detail::_Cell{ .index = range, .kind = (leftwards ? detail::_CellKind::rightBottom : detail::_CellKind::rightTop) });
-					for (size_t i = 1; i < distance; ++i)
-						row.push_back(detail::_Cell{ .index = range, .kind = detail::_CellKind::horizontal });
-					row.push_back(detail::_Cell{ .index = range, .kind = (leftwards ? detail::_CellKind::leftTop : detail::_CellKind::leftBottom) });
-
-					/* add the traversals after the rotation and update the slice itself and the indices */
-					fConstructAddTraversals(grid, slice, (leftwards ? begin + 1 : end + distance), slice.size());
-					if (leftwards) {
-						std::swap(slice[begin], slice[begin - distance]);
-						++begin;
-					}
-					else {
-						--end;
-						std::swap(slice[end], slice[end + distance]);
-					}
-				}
-			}
 			void fConstructAddCrossing(std::vector<detail::_Row>& grid, std::vector<size_t>& slice, size_t index, size_t target) const {
 				detail::_Row& row = grid.emplace_back();
 				bool leftwards = (target < index);
 
 				/* add the traversals before the crossing */
-				fConstructAddTraversals(grid, slice, 0, std::min<size_t>(index, target));
+				fFillTraversals(row, slice, 0, std::min<size_t>(index, target));
 
 				/* add the crossing itself */
 				size_t range = slice[index];
@@ -1326,7 +1364,7 @@ namespace ascg {
 				row.push_back(detail::_Cell{ .index = range, .kind = (leftwards ? detail::_CellKind::leftTop : detail::_CellKind::leftBottom) });
 
 				/* add the traversals after the crossing and update the slice itself */
-				fConstructAddTraversals(grid, slice, std::max<size_t>(index, target) + 1, slice.size());
+				fFillTraversals(row, slice, std::max<size_t>(index, target) + 1, slice.size());
 				std::swap(slice[index], slice[target]);
 			}
 			void fConstructTransitions(std::vector<detail::_Row>& grid, std::vector<size_t>& slice) const {
@@ -1406,7 +1444,7 @@ namespace ascg {
 
 					/* check if the left empty slot should be used and add the necessary rotations and patch the indices accordingly */
 					if ((leftMove > 0 && leftMove <= rightMove) || rightMove == 0) {
-						fConstructAddRotation(grid, slice, bestTarget - leftMove, bestTarget, bestTarget - leftMove - 1);
+						fInsertRotation(grid, slice, bestTarget - leftMove, bestTarget, bestTarget - leftMove - 1, grid.size());
 						--bestTarget;
 						if (bestTarget > bestIndex && bestTarget - leftMove < bestIndex)
 							--bestIndex;
@@ -1416,7 +1454,7 @@ namespace ascg {
 					else {
 						if (bestTarget + rightMove == slice.size())
 							slice.push_back(detail::SlotUnused);
-						fConstructAddRotation(grid, slice, bestTarget, bestTarget + rightMove, bestTarget + 1);
+						fInsertRotation(grid, slice, bestTarget, bestTarget + rightMove, bestTarget + 1, grid.size());
 						if (bestTarget < bestIndex && bestTarget + rightMove > bestIndex)
 							++bestIndex;
 					}
@@ -1425,37 +1463,13 @@ namespace ascg {
 					fConstructAddCrossing(grid, slice, bestIndex, bestTarget);
 				}
 
-				/* find the next mis-placed entry, which can be moved to its new placement (loop until they have all been moved) */
-				for (size_t i = 0; i < slice.size();) {
-					if (slice[i] == detail::SlotUnused || slice[i] == i) {
-						++i;
-						continue;
-					}
+				/* insert the remaining slice corrections until the slice is well-placed (must not be possible, as they are well-ordered
+				*	and can all fit into the row, and any misplacement implies that there must be empty spots to use for shifting) */
+				fInsertSliceCorrections(grid, slice, grid.size());
 
-					/* check if the entire range is free for the slice slot to be rotated into place */
-					bool blocked = false;
-					for (size_t j : detail::MinMaxWalk{ i, slice[i], false, false }) {
-						if (j == i || slice[j] == detail::SlotUnused)
-							continue;
-						blocked = true;
-						break;
-					}
-
-					/* apply the rotation and update the indices */
-					if (blocked)
-						++i;
-					else {
-						fConstructAddRotation(grid, slice, i, i + 1, slice[i]);
-						i = 0;
-					}
-				}
-
-				/* check if no more mis-placed entries have been found (all slices are already well ordered)
-				*	and ensure that at least one row was added, as otherwise two nodes may directly touch */
-				if (numberOfRows == grid.size()) {
-					grid.emplace_back();
-					fConstructAddTraversals(grid, slice, 0, slice.size());
-				}
+				/* ensure that at least one row was added, as otherwise two nodes may directly touch */
+				if (numberOfRows == grid.size())
+					fFillTraversals(grid.emplace_back(), slice, 0, slice.size());
 			}
 
 			bool fStraightenRemoveNodeBend(std::vector<detail::_Row>& grid, size_t x, size_t y, size_t xCorner, size_t yCorner) const {
@@ -1600,6 +1614,167 @@ namespace ascg {
 				return false;
 			}
 
+			int8_t fShiftCheckPreference(const std::vector<detail::_Row>& grid, size_t y, size_t x, size_t end) const {
+				/* check if the transition actually exists */
+				if (y == end || grid[y = detail::Towards(y, end)][x].kind == detail::_CellKind::empty)
+					return 0;
+
+				/* follow the strand until the first shift to the left or right is encountered */
+				while (grid[y][x].lineVertical())
+					y = detail::Towards(y, end);
+				if (grid[y][x].cornerLeft())
+					return -1;
+				return (grid[y][x].cornerRight() ? 1 : 0);
+			}
+			bool fShiftNodes(std::vector<detail::_Row>& grid) const {
+				/* find the next node and check if it should be shifted (iterate until one has been found or all have been checked;
+				*	Important: two rows back-to-back must not both contain nodes, there must always exist an intermediate row) */
+				for (size_t y = 0; y < grid.size(); ++y) {
+					detail::_Row& row = grid[y];
+
+					/* check if the row contains a node */
+					size_t first = std::ranges::find(row, detail::_CellKind::node, &detail::_Cell::kind) - row.begin();
+					if (first >= row.size())
+						continue;
+
+					/* count the preferences of all transitions going out of the node and check if there is a bias */
+					size_t leftShift = 0, rightShift = 0, last = 0;
+					for (size_t i = first; row[i].kind == detail::_CellKind::node; ++i) {
+						last = i;
+						if (int8_t shift = fShiftCheckPreference(grid, y, i, 0); shift != 0)
+							++(shift < 0 ? leftShift : rightShift);
+						if (int8_t shift = fShiftCheckPreference(grid, y, i, grid.size() - 1); shift != 0)
+							++(shift < 0 ? leftShift : rightShift);
+					}
+					if (leftShift == rightShift)
+						continue;
+					bool leftwards = (leftShift > rightShift);
+
+					/* check if the entire grid needs to be widened to accomodate the new shifting of the node */
+					auto shiftIntoRange = std::ranges::subrange(row.begin() + (leftwards ? 0 : last + 1), (leftwards ? row.begin() + first : row.end()));
+					if (!std::ranges::any_of(shiftIntoRange, [](auto v) { return (v == detail::_CellKind::empty); }, &detail::_Cell::kind)) {
+						size_t index = (leftwards ? 0 : row.size());
+
+						/* increase the grid accordingly and patch the indices */
+						for (size_t i = 0; i < grid.size(); ++i)
+							grid[i].insert(grid[i].begin() + index, detail::_Cell{});
+						if (leftwards)
+							++first, ++last;
+					}
+
+					/* shift the original row itself into position (must be able to place all, as an
+					*	empty new cell would already have been inserted, should it not have matched) */
+					detail::_Cell temp{};
+					if (leftwards) for (size_t i = last + 1; i > 0; --i) {
+						std::swap(temp, row[i - 1]);
+						if (temp.kind == detail::_CellKind::empty)
+							break;
+					}
+					else for (size_t i = first; i < row.size(); ++i) {
+						std::swap(temp, row[i]);
+						if (temp.kind == detail::_CellKind::empty)
+							break;
+					}
+
+					/* setup the slice to move the previous entries (may invalidate the row reference) */
+					std::vector<size_t> slice(row.size(), detail::SlotUnused);
+					if (y > 0) {
+						detail::_Row& prev = grid[y - 1];
+
+						/* setup the initial identity mapping */
+						for (size_t i = 0; i < prev.size(); ++i)
+							slice[i] = (prev[i].anyBottom() ? i : detail::SlotUnused);
+
+						/* iterate again and apply the shift to the slice such that they all target their new
+						*	shifted position (must be shiftable, as an empty node would otherwise have been inserted) */
+						if (leftwards) for (size_t i = last + 1; i > 0; --i) {
+							if (slice[i - 1] != detail::SlotUnused)
+								--slice[i - 1];
+							else if (i <= first)
+								break;
+						}
+						else for (size_t i = first; i < prev.size(); ++i) {
+							if (slice[i] != detail::SlotUnused)
+								++slice[i];
+							else if (i > last)
+								break;
+						}
+
+						/* insert the shifting */
+						y = fInsertSliceCorrections(grid, slice, y);
+					}
+
+					/* setup the slice to move the next entries (may invalidate the row reference) */
+					if (y + 1 < grid.size()) {
+						detail::_Row& next = grid[y + 1];
+
+						/* setup the initial identity mapping */
+						for (size_t i = 0; i < next.size(); ++i)
+							slice[i] = (next[i].anyTop() ? i : detail::SlotUnused);
+
+						/* iterate again and apply the shift to the slice such that they each start at their new
+						*	shifted position (must be shiftable, as an empty node would otherwise have been inserted) */
+						size_t current = detail::SlotUnused;
+						if (leftwards) for (size_t i = last + 1; i > 0; --i) {
+							std::swap(current, slice[i - 1]);
+							if (current == detail::SlotUnused && i <= first)
+								break;
+						}
+						else for (size_t i = first; i < next.size(); ++i) {
+							std::swap(current, slice[i]);
+							if (current == detail::SlotUnused && i > last)
+								break;
+						}
+
+						/* insert the shifting */
+						fInsertSliceCorrections(grid, slice, y + 1);
+					}
+					return true;
+				}
+				return false;
+			}
+
+			void fShrinkVertical(std::vector<detail::_Row>& grid) const {
+				size_t sizeReduced = 0, afterNode = 0;
+				bool lastRemovable = false;
+
+				/* iterate over the rows and remove all removable rows, while ensuring
+				*	that there is at least one row between two neighboring nodes */
+				for (size_t i = 0; i < grid.size(); ++i) {
+					bool removable = true, node = false;
+
+					/* check if the current row either is a node or fully removable */
+					for (const detail::_Cell& cell : grid[i]) {
+						if (cell.kind != detail::_CellKind::empty && cell.kind != detail::_CellKind::vertical)
+							removable = false;
+						if (cell.kind == detail::_CellKind::node)
+							node = true;
+					}
+
+					/* check if the last row was optional and can be removed */
+					if (lastRemovable && !node)
+						--sizeReduced;
+
+					/* check if the row can immediately be removed */
+					if (removable && afterNode < sizeReduced) {
+						lastRemovable = false;
+						continue;
+					}
+					lastRemovable = removable;
+
+					/* add the row to the ouptut */
+					if (sizeReduced != i)
+						grid[sizeReduced] = std::move(grid[i]);
+					++sizeReduced;
+					if (node)
+						afterNode = sizeReduced;
+				}
+
+				/* check if the actual grid can be reduced */
+				if (sizeReduced < grid.size())
+					grid.erase(grid.begin() + sizeReduced, grid.end());
+			}
+
 			void fPrintGrid(const std::vector<detail::_Row>& grid) const {
 				for (const detail::_Row& row : grid) {
 					std::string line;
@@ -1655,7 +1830,19 @@ namespace ascg {
 				std::vector<detail::_Row> grid;
 				fConstructGrid(layers, grid);
 
-				while (fStraightenGraph(grid));
+				for (size_t i = 0; ; ++i) {
+					while (fStraightenGraph(grid));
+					fShrinkVertical(grid);
+
+					if (i >= 2)
+						break;
+
+					fPrintGrid(grid);
+
+					/* shifting nodes requires intermediate rows between any two neighboring nodes */
+					if (!fShiftNodes(grid))
+						break;
+				}
 
 				fPrintGrid(grid);
 			}
