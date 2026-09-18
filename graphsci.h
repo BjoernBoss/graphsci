@@ -1190,7 +1190,81 @@ namespace ascg {
 		};
 		using _Row = std::vector<detail::_Cell>;
 
+		/* temporary */
 		class _Renderer {
+		private:
+			const std::vector<detail::Layer>& pLayers;
+			const std::vector<detail::_Row>& pGrid;
+
+		public:
+			_Renderer(const std::vector<detail::Layer>& layers, const std::vector<detail::_Row>& grid) : pLayers{ layers }, pGrid{ grid } {}
+
+		private:
+			std::string fDrawRow(const detail::_Row& row) const {
+				std::string line;
+
+				/* iterate over the cells and convert them to the string */
+				for (size_t i = 0; i < row.size(); ++i) {
+					const detail::_Cell& cell = row[i];
+
+					/* add the character between the previous and current cell */
+					if (i > 0) {
+						if (cell.kind == detail::CellKind::node && row[i - 1].kind == cell.kind)
+							line.push_back('#');
+						else if (cell.anyLeft())
+							line.push_back('-');
+						else
+							line.push_back(' ');
+					}
+
+					/* convert the cell itself to a character */
+					if (cell.kind == detail::CellKind::node)
+						line.push_back('#');
+					else if (cell.lineVertical())
+						line.push_back('|');
+					else if (cell.cornerTop())
+						line.push_back('\'');
+					else if (cell.cornerBottom())
+						line.push_back(',');
+					else if (cell.kind == detail::CellKind::horizontal)
+						line.push_back('-');
+					else
+						line.push_back(' ');
+				}
+				return line;
+			}
+
+		public:
+			ascg::Graph draw() const {
+				ascg::Graph graph;
+
+				/* reserve the memory for the output graph */
+				graph.rows.reserve(pGrid.size());
+				graph.map.reserve(pGrid.size());
+
+				/* render all of the rows and setup the map back to the layers (based on the preserved orderning of the nodes) */
+				size_t node = 0;
+				for (size_t i = 0; i < pGrid.size(); ++i) {
+					graph.rows.push_back(fDrawRow(pGrid[i]));
+
+					/* check if this row contained a node and otherwise mark it as an intermediate row */
+					if (std::ranges::any_of(pGrid[i], [](auto val) -> bool { return val.kind == detail::CellKind::node; }))
+						graph.map.push_back(pLayers[node++].index);
+					else
+						graph.map.push_back(ascg::NoNode);
+				}
+				return graph;
+			}
+		};
+
+		class GridBuilder {
+		private:
+			const std::vector<detail::Layer>& pLayers;
+			mutable std::vector<detail::_Row> pGrid;
+
+		public:
+			GridBuilder(const std::vector<detail::Layer>& layers) : pLayers{ layers } {}
+
 		private:
 			void fFillTraversals(detail::_Row& row, std::vector<size_t>& slice, size_t begin, size_t end) const {
 				for (size_t i = begin; i < end; ++i) {
@@ -1200,7 +1274,7 @@ namespace ascg {
 						row.push_back(detail::_Cell{ detail::CellKind::vertical });
 				}
 			}
-			size_t fInsertRotation(std::vector<detail::_Row>& grid, std::vector<size_t>& slice, size_t begin, size_t end, size_t target, size_t where) const {
+			size_t fInsertRotation(std::vector<size_t>& slice, size_t begin, size_t end, size_t target, size_t where) const {
 				/* add the rotation of the range [begin, end) with begin finally being placed at target */
 				if (begin == target) return where;
 				bool leftwards = (target < begin);
@@ -1208,7 +1282,7 @@ namespace ascg {
 
 				/* iterate until no more entries need to be moved */
 				while (begin != end) {
-					detail::_Row& row = *grid.emplace(grid.begin() + where++);
+					detail::_Row& row = *pGrid.emplace(pGrid.begin() + where++);
 
 					/* add all traversals before the next rotation */
 					fFillTraversals(row, slice, 0, (leftwards ? begin - distance : end - 1));
@@ -1232,7 +1306,7 @@ namespace ascg {
 				}
 				return where;
 			}
-			size_t fInsertSliceCorrections(std::vector<detail::_Row>& grid, std::vector<size_t>& slice, size_t where) const {
+			size_t fInsertSliceCorrections(std::vector<size_t>& slice, size_t where) const {
 				/* find the next misplaced entry, which can be moved to its new placement (loop until they have all
 				*	been moved; must always find one, as the caller guarantees that the slice targets are possible) */
 				for (size_t i = 0; i < slice.size();) {
@@ -1254,15 +1328,16 @@ namespace ascg {
 					if (blocked)
 						++i;
 					else {
-						where = fInsertRotation(grid, slice, i, i + 1, slice[i], where);
+						where = fInsertRotation(slice, i, i + 1, slice[i], where);
 						i = 0;
 					}
 				}
 				return where;
 			}
 
-			std::map<size_t, size_t> fSetupNodeMap(const std::vector<detail::Layer>& layers, size_t index, size_t width) const {
-				const detail::Layer& layer = layers[index];
+		private:
+			std::map<size_t, size_t> fSetupNodeMap(size_t index, size_t width) const {
+				const detail::Layer& layer = pLayers[index];
 				std::map<size_t, size_t> out;
 
 				/* helper to collect the endpoint ranges and sort them by their
@@ -1311,15 +1386,15 @@ namespace ascg {
 					slot += shift;
 				return out;
 			}
-			std::vector<size_t> fConstructNode(const std::vector<detail::Layer>& layers, size_t index, std::vector<detail::_Row>& grid, size_t width, std::map<size_t, size_t>& mapping) const {
-				const detail::Layer& layer = layers[index];
+			std::vector<size_t> fConstructNode(size_t index, size_t width, std::map<size_t, size_t>& mapping) const {
+				const detail::Layer& layer = pLayers[index];
 
 				/* setup the initial slice and row */
-				detail::_Row& row = grid.emplace_back(width, detail::_Cell{});
+				detail::_Row& row = pGrid.emplace_back(width, detail::_Cell{});
 				std::vector<size_t> slice(width, detail::SlotUnused);
 
 				/* setup the mapping of the next node (necessary to populate the slice) */
-				std::map<size_t, size_t> upcoming = (index + 1 >= layers.size() ? std::map<size_t, size_t>{} : fSetupNodeMap(layers, index + 1, width));
+				std::map<size_t, size_t> upcoming = (index + 1 >= pLayers.size() ? std::map<size_t, size_t>{} : fSetupNodeMap(index + 1, width));
 
 				/* iterate over the nodes and write them out to the grid and update the slice simultaneously */
 				for (const detail::Point& point : layer.points) {
@@ -1345,8 +1420,8 @@ namespace ascg {
 				mapping = std::move(upcoming);
 				return slice;
 			}
-			void fConstructAddCrossing(std::vector<detail::_Row>& grid, std::vector<size_t>& slice, size_t index, size_t target) const {
-				detail::_Row& row = grid.emplace_back();
+			void fConstructAddCrossing(std::vector<size_t>& slice, size_t index, size_t target) const {
+				detail::_Row& row = pGrid.emplace_back();
 				bool leftwards = (target < index);
 
 				/* add the traversals before the crossing */
@@ -1366,8 +1441,8 @@ namespace ascg {
 				fFillTraversals(row, slice, std::max<size_t>(index, target) + 1, slice.size());
 				std::swap(slice[index], slice[target]);
 			}
-			void fConstructTransitions(std::vector<detail::_Row>& grid, std::vector<size_t>& slice) const {
-				size_t numberOfRows = grid.size();
+			void fConstructTransitions(std::vector<size_t>& slice) const {
+				size_t numberOfRows = pGrid.size();
 
 				/* add all rotations and swaps to ensure the slice is in order */
 				while (true) {
@@ -1419,7 +1494,7 @@ namespace ascg {
 						break;
 					bestCanMove = (bestMoveLeft ? (bestTarget > 0 && slice[bestTarget - 1] == detail::SlotUnused) : (bestTarget + 1 < slice.size() && slice[bestTarget + 1] == detail::SlotUnused));
 					if (bestCanMove) {
-						fConstructAddCrossing(grid, slice, bestIndex, (bestMoveLeft ? bestTarget - 1 : bestTarget + 1));
+						fConstructAddCrossing(slice, bestIndex, (bestMoveLeft ? bestTarget - 1 : bestTarget + 1));
 						continue;
 					}
 
@@ -1443,7 +1518,7 @@ namespace ascg {
 
 					/* check if the left empty slot should be used and add the necessary rotations and patch the indices accordingly */
 					if ((leftMove > 0 && leftMove <= rightMove) || rightMove == 0) {
-						fInsertRotation(grid, slice, bestTarget - leftMove, bestTarget, bestTarget - leftMove - 1, grid.size());
+						fInsertRotation(slice, bestTarget - leftMove, bestTarget, bestTarget - leftMove - 1, pGrid.size());
 						--bestTarget;
 						if (bestTarget > bestIndex && bestTarget - leftMove < bestIndex)
 							--bestIndex;
@@ -1453,32 +1528,32 @@ namespace ascg {
 					else {
 						if (bestTarget + rightMove == slice.size())
 							slice.push_back(detail::SlotUnused);
-						fInsertRotation(grid, slice, bestTarget, bestTarget + rightMove, bestTarget + 1, grid.size());
+						fInsertRotation(slice, bestTarget, bestTarget + rightMove, bestTarget + 1, pGrid.size());
 						if (bestTarget < bestIndex && bestTarget + rightMove > bestIndex)
 							++bestIndex;
 					}
 
 					/* apply the final actual crossing */
-					fConstructAddCrossing(grid, slice, bestIndex, bestTarget);
+					fConstructAddCrossing(slice, bestIndex, bestTarget);
 				}
 
 				/* insert the remaining slice corrections until the slice is well-placed (must not be possible, as they are well-ordered
 				*	and can all fit into the row, and any misplacement implies that there must be empty spots to use for shifting) */
-				fInsertSliceCorrections(grid, slice, grid.size());
+				fInsertSliceCorrections(slice, pGrid.size());
 
 				/* ensure that at least one row was added, as otherwise two nodes may directly touch */
-				if (numberOfRows == grid.size())
-					fFillTraversals(grid.emplace_back(), slice, 0, slice.size());
+				if (numberOfRows == pGrid.size())
+					fFillTraversals(pGrid.emplace_back(), slice, 0, slice.size());
 			}
-			std::vector<detail::_Row> fConstructGrid(const std::vector<detail::Layer>& layers) const {
-				std::vector<detail::_Row> grid;
-				if (layers.empty())
-					return grid;
+			void fConstructGrid() const {
+				pGrid.clear();
+				if (pLayers.empty())
+					return;
 
 				/* compute the minimum width to give to the graph (minimum
 				*	required plus maximum number of crossings between two layers) */
 				size_t lastWidth = 0, totalWidth = 0;
-				for (const detail::Layer& layer : layers) {
+				for (const detail::Layer& layer : pLayers) {
 					size_t width = layer.points.size(), crossings = 0;
 
 					/* helper to sum up the crossings of the current edge with the previous edges */
@@ -1511,24 +1586,24 @@ namespace ascg {
 
 				/* fetch the initial node mapping and iterate over the layers and convert
 				*	them to node-rows in the grid and add the intermediate transitions */
-				std::map<size_t, size_t> mapping = fSetupNodeMap(layers, 0, totalWidth);
+				std::map<size_t, size_t> mapping = fSetupNodeMap(0, totalWidth);
 				for (size_t i = 0;; ++i) {
-					std::vector<size_t> slice = fConstructNode(layers, i, grid, totalWidth, mapping);
-					if (i + 1 >= layers.size())
+					std::vector<size_t> slice = fConstructNode(i, totalWidth, mapping);
+					if (i + 1 >= pLayers.size())
 						break;
-					fConstructTransitions(grid, slice);
+					fConstructTransitions(slice);
 				}
 
 				/* flood the entire grid to be rectangular (re-compute the width,
 				*	in case some placement or rotations added additional columns) */
-				for (size_t i = 0; i < grid.size(); ++i)
-					totalWidth = std::max<size_t>(totalWidth, grid[i].size());
-				for (detail::_Row& row : grid)
+				for (size_t i = 0; i < pGrid.size(); ++i)
+					totalWidth = std::max<size_t>(totalWidth, pGrid[i].size());
+				for (detail::_Row& row : pGrid)
 					row.resize(totalWidth);
-				return grid;
 			}
 
-			bool fStraightenRemoveNodeBend(std::vector<detail::_Row>& grid, size_t x, size_t y, size_t xCorner, size_t yCorner) const {
+		private:
+			bool fStraightenRemoveNodeBend(size_t x, size_t y, size_t xCorner, size_t yCorner) const {
 				size_t target = xCorner;
 
 				/* count the number of empty spots by which the final line can be moved */
@@ -1537,10 +1612,10 @@ namespace ascg {
 					bool blocked = false;
 
 					/* check if the entire strand is still part of the node and is free to be used */
-					if (grid[yCorner][next].kind != detail::CellKind::node)
+					if (pGrid[yCorner][next].kind != detail::CellKind::node)
 						break;
 					for (size_t i : detail::MinMaxWalk{ y, yCorner, true, true }) {
-						if ((blocked = !grid[i][next].freeVertical()))
+						if ((blocked = !pGrid[i][next].freeVertical()))
 							break;
 					}
 
@@ -1556,46 +1631,46 @@ namespace ascg {
 
 				/* erase the old horizontal and vertical lines and insert the new one */
 				for (size_t i : detail::MinMaxWalk{ target, xCorner, true, true })
-					grid[y][i].kind = grid[y][i].removeHorizontal();
+					pGrid[y][i].kind = pGrid[y][i].removeHorizontal();
 				for (size_t i : detail::MinMaxWalk{ y, yCorner, true, true }) {
-					grid[i][xCorner].kind = grid[i][xCorner].removeVertical();
-					grid[i][target].kind = grid[i][target].addVertical();
+					pGrid[i][xCorner].kind = pGrid[i][xCorner].removeVertical();
+					pGrid[i][target].kind = pGrid[i][target].addVertical();
 				}
 
 				/* move the new corner over */
-				grid[y][target].kind = (target == x ? detail::CellKind::vertical : grid[y][xCorner].kind);
-				grid[y][xCorner].kind = detail::CellKind::empty;
+				pGrid[y][target].kind = (target == x ? detail::CellKind::vertical : pGrid[y][xCorner].kind);
+				pGrid[y][xCorner].kind = detail::CellKind::empty;
 				return true;
 			}
-			bool fStraightenRemoveCornerRectangle(std::vector<detail::_Row>& grid, size_t x, size_t y, size_t xCorner, size_t yCorner) const {
+			bool fStraightenRemoveCornerRectangle(size_t x, size_t y, size_t xCorner, size_t yCorner) const {
 				/* check if the extension of the horizontal axis at the crossing to the new corner is free */
 				for (size_t i : detail::MinMaxWalk{ x, detail::Towards(xCorner, x), false, false }) {
-					if (!grid[yCorner][i].freeHorizontal())
+					if (!pGrid[yCorner][i].freeHorizontal())
 						return false;
 				}
 
 				/* check if the extension of the original axis can freely get next to the corner */
 				for (size_t i : detail::MinMaxWalk{ yCorner, detail::Towards(y, yCorner), false, false }) {
-					if (!grid[i][x].freeVertical())
+					if (!pGrid[i][x].freeVertical())
 						return false;
 				}
 
 				/* erase the old horizontal and vertical lines and insert the new ones */
 				for (size_t i : detail::MinMaxWalk{ xCorner, detail::Towards(x, xCorner), false, false }) {
-					grid[y][i].kind = grid[y][i].removeHorizontal();
-					grid[yCorner][i].kind = grid[yCorner][i].addHorizontal();
+					pGrid[y][i].kind = pGrid[y][i].removeHorizontal();
+					pGrid[yCorner][i].kind = pGrid[yCorner][i].addHorizontal();
 				}
 				for (size_t i : detail::MinMaxWalk{ y, yCorner, true, true }) {
-					grid[i][xCorner].kind = grid[i][xCorner].removeVertical();
-					grid[i][x].kind = grid[i][x].addVertical();
+					pGrid[i][xCorner].kind = pGrid[i][xCorner].removeVertical();
+					pGrid[i][x].kind = pGrid[i][x].addVertical();
 				}
 
 				/* move the new corner over */
-				grid[yCorner][x] = grid[y][x];
-				grid[y][x].kind = detail::CellKind::vertical;
+				pGrid[yCorner][x] = pGrid[y][x];
+				pGrid[y][x].kind = detail::CellKind::vertical;
 				return true;
 			}
-			bool fStraightenRemoveIndentRectangle(std::vector<detail::_Row>& grid, size_t x, size_t y, size_t xCorner, size_t yCorner) const {
+			bool fStraightenRemoveIndentRectangle(size_t x, size_t y, size_t xCorner, size_t yCorner) const {
 				/* given the symmetry of the rectangle, only look at it when moving
 				*	downwards (as each scenario will otherwise be investigated twice) */
 				if (y > yCorner)
@@ -1605,7 +1680,7 @@ namespace ascg {
 				/* find the end of the horizontal line back, which is parallel to the line of the initial corner */
 				while (target != x) {
 					target = detail::Towards(target, x);
-					if (!grid[yCorner][target].lineHorizontal())
+					if (!pGrid[yCorner][target].lineHorizontal())
 						break;
 				}
 
@@ -1613,7 +1688,7 @@ namespace ascg {
 				while (true) {
 					bool free = true;
 					for (size_t i : detail::MinMaxWalk{ y, yCorner, true, true }) {
-						if (!(free = grid[i][target].freeVertical()))
+						if (!(free = pGrid[i][target].freeVertical()))
 							break;
 					}
 					if (free)
@@ -1627,25 +1702,25 @@ namespace ascg {
 
 				/* erase the old horizontal and vertical lines and insert the new ones */
 				for (size_t i : detail::MinMaxWalk{ target, xCorner, true, true }) {
-					grid[y][i].kind = grid[y][i].removeHorizontal();
-					grid[yCorner][i].kind = grid[yCorner][i].removeHorizontal();
+					pGrid[y][i].kind = pGrid[y][i].removeHorizontal();
+					pGrid[yCorner][i].kind = pGrid[yCorner][i].removeHorizontal();
 				}
 				for (size_t i : detail::MinMaxWalk{ y, yCorner, true, true }) {
-					grid[i][target].kind = grid[i][target].addVertical();
-					grid[i][xCorner].kind = grid[i][xCorner].removeVertical();
+					pGrid[i][target].kind = pGrid[i][target].addVertical();
+					pGrid[i][xCorner].kind = pGrid[i][xCorner].removeVertical();
 				}
 
 				/* move the corners over */
-				grid[y][target].kind = (target == x ? detail::CellKind::vertical : grid[y][xCorner].kind);
-				grid[yCorner][target].kind = (grid[yCorner][target].kind != detail::CellKind::horizontal ? detail::CellKind::vertical : grid[yCorner][xCorner].kind);
-				grid[y][xCorner].kind = detail::CellKind::empty;
-				grid[yCorner][xCorner].kind = detail::CellKind::empty;
+				pGrid[y][target].kind = (target == x ? detail::CellKind::vertical : pGrid[y][xCorner].kind);
+				pGrid[yCorner][target].kind = (pGrid[yCorner][target].kind != detail::CellKind::horizontal ? detail::CellKind::vertical : pGrid[yCorner][xCorner].kind);
+				pGrid[y][xCorner].kind = detail::CellKind::empty;
+				pGrid[yCorner][xCorner].kind = detail::CellKind::empty;
 				return true;
 			}
-			bool fStraightenGraph(std::vector<detail::_Row>& grid) const {
+			bool fStraightenGraph() const {
 				/* find the next corner to pursue (iterate until one has been found or all have been checked) */
-				for (size_t y = 0; y < grid.size(); ++y) {
-					detail::_Row& row = grid[y];
+				for (size_t y = 0; y < pGrid.size(); ++y) {
+					detail::_Row& row = pGrid[y];
 					for (size_t x = 0; x < row.size(); ++x) {
 						detail::_Cell& cell = row[x];
 						if (!cell.anyCorner())
@@ -1653,40 +1728,41 @@ namespace ascg {
 
 						/* ensure that the range forms the 'z' form and find the other end of the range corner */
 						size_t xCorner = x, yCorner = y;
-						if (cell.cornerLeft()) while (grid[yCorner][--xCorner].lineHorizontal());
-						else while (grid[yCorner][++xCorner].lineHorizontal());
-						if (cell.cornerTop()) while (grid[++yCorner][xCorner].lineVertical());
-						else while (grid[--yCorner][xCorner].lineVertical());
+						if (cell.cornerLeft()) while (pGrid[yCorner][--xCorner].lineHorizontal());
+						else while (pGrid[yCorner][++xCorner].lineHorizontal());
+						if (cell.cornerTop()) while (pGrid[++yCorner][xCorner].lineVertical());
+						else while (pGrid[--yCorner][xCorner].lineVertical());
 
 						/* check if its one of the existing straightening patterns and try to apply it */
-						if (grid[yCorner][xCorner].kind == detail::CellKind::node && fStraightenRemoveNodeBend(grid, x, y, xCorner, yCorner))
+						if (pGrid[yCorner][xCorner].kind == detail::CellKind::node && fStraightenRemoveNodeBend(x, y, xCorner, yCorner))
 							return true;
-						else if (grid[yCorner][xCorner].kind == cell.kind && fStraightenRemoveCornerRectangle(grid, x, y, xCorner, yCorner))
+						else if (pGrid[yCorner][xCorner].kind == cell.kind && fStraightenRemoveCornerRectangle(x, y, xCorner, yCorner))
 							return true;
-						else if (grid[yCorner][xCorner].kind == cell.mirrorVertical() && fStraightenRemoveIndentRectangle(grid, x, y, xCorner, yCorner))
+						else if (pGrid[yCorner][xCorner].kind == cell.mirrorVertical() && fStraightenRemoveIndentRectangle(x, y, xCorner, yCorner))
 							return true;
 					}
 				}
 				return false;
 			}
 
-			int8_t fShiftCheckPreference(const std::vector<detail::_Row>& grid, size_t y, size_t x, size_t end) const {
+		private:
+			int8_t fShiftCheckPreference(size_t y, size_t x, size_t end) const {
 				/* check if the transition actually exists */
-				if (y == end || grid[y = detail::Towards(y, end)][x].kind == detail::CellKind::empty)
+				if (y == end || pGrid[y = detail::Towards(y, end)][x].kind == detail::CellKind::empty)
 					return 0;
 
 				/* follow the strand until the first shift to the left or right is encountered */
-				while (grid[y][x].lineVertical())
+				while (pGrid[y][x].lineVertical())
 					y = detail::Towards(y, end);
-				if (grid[y][x].cornerLeft())
+				if (pGrid[y][x].cornerLeft())
 					return -1;
-				return (grid[y][x].cornerRight() ? 1 : 0);
+				return (pGrid[y][x].cornerRight() ? 1 : 0);
 			}
-			bool fShiftNodes(std::vector<detail::_Row>& grid) const {
+			bool fShiftNodes() const {
 				/* find the next node and check if it should be shifted (iterate until one has been found or all have been checked;
 				*	Important: two rows back-to-back must not both contain nodes, there must always exist an intermediate row) */
-				for (size_t y = 0; y < grid.size(); ++y) {
-					detail::_Row& row = grid[y];
+				for (size_t y = 0; y < pGrid.size(); ++y) {
+					detail::_Row& row = pGrid[y];
 
 					/* check if the row contains a node */
 					size_t first = std::ranges::find(row, detail::CellKind::node, &detail::_Cell::kind) - row.begin();
@@ -1697,9 +1773,9 @@ namespace ascg {
 					size_t leftShift = 0, rightShift = 0, last = 0;
 					for (size_t i = first; row[i].kind == detail::CellKind::node; ++i) {
 						last = i;
-						if (int8_t shift = fShiftCheckPreference(grid, y, i, 0); shift != 0)
+						if (int8_t shift = fShiftCheckPreference(y, i, 0); shift != 0)
 							++(shift < 0 ? leftShift : rightShift);
-						if (int8_t shift = fShiftCheckPreference(grid, y, i, grid.size() - 1); shift != 0)
+						if (int8_t shift = fShiftCheckPreference(y, i, pGrid.size() - 1); shift != 0)
 							++(shift < 0 ? leftShift : rightShift);
 					}
 					if (leftShift == rightShift)
@@ -1712,8 +1788,8 @@ namespace ascg {
 						size_t index = (leftwards ? 0 : row.size());
 
 						/* increase the grid accordingly and patch the indices */
-						for (size_t i = 0; i < grid.size(); ++i)
-							grid[i].insert(grid[i].begin() + index, detail::_Cell{});
+						for (size_t i = 0; i < pGrid.size(); ++i)
+							pGrid[i].insert(pGrid[i].begin() + index, detail::_Cell{});
 						if (leftwards)
 							++first, ++last;
 					}
@@ -1735,7 +1811,7 @@ namespace ascg {
 					/* setup the slice to move the previous entries (may invalidate the row reference) */
 					std::vector<size_t> slice(row.size(), detail::SlotUnused);
 					if (y > 0) {
-						detail::_Row& prev = grid[y - 1];
+						detail::_Row& prev = pGrid[y - 1];
 
 						/* setup the initial identity mapping */
 						for (size_t i = 0; i < prev.size(); ++i)
@@ -1757,12 +1833,12 @@ namespace ascg {
 						}
 
 						/* insert the shifting */
-						y = fInsertSliceCorrections(grid, slice, y);
+						y = fInsertSliceCorrections(slice, y);
 					}
 
 					/* setup the slice to move the next entries (may invalidate the row reference) */
-					if (y + 1 < grid.size()) {
-						detail::_Row& next = grid[y + 1];
+					if (y + 1 < pGrid.size()) {
+						detail::_Row& next = pGrid[y + 1];
 
 						/* setup the initial identity mapping */
 						for (size_t i = 0; i < next.size(); ++i)
@@ -1783,24 +1859,25 @@ namespace ascg {
 						}
 
 						/* insert the shifting */
-						fInsertSliceCorrections(grid, slice, y + 1);
+						fInsertSliceCorrections(slice, y + 1);
 					}
 					return true;
 				}
 				return false;
 			}
 
-			void fShrinkVertical(std::vector<detail::_Row>& grid) const {
+		private:
+			void fShrinkVertical() const {
 				size_t sizeReduced = 0, afterNode = 0;
 				bool lastRemovable = false;
 
 				/* iterate over the rows and remove all removable rows, while ensuring
 				*	that there is at least one row between two neighboring nodes */
-				for (size_t i = 0; i < grid.size(); ++i) {
+				for (size_t i = 0; i < pGrid.size(); ++i) {
 					bool removable = true, node = false;
 
 					/* check if the current row either is a node or fully removable */
-					for (const detail::_Cell& cell : grid[i]) {
+					for (const detail::_Cell& cell : pGrid[i]) {
 						if (cell.kind != detail::CellKind::empty && cell.kind != detail::CellKind::vertical)
 							removable = false;
 						if (cell.kind == detail::CellKind::node)
@@ -1820,69 +1897,47 @@ namespace ascg {
 
 					/* add the row to the ouptut */
 					if (sizeReduced != i)
-						grid[sizeReduced] = std::move(grid[i]);
+						pGrid[sizeReduced] = std::move(pGrid[i]);
 					++sizeReduced;
 					if (node)
 						afterNode = sizeReduced;
 				}
 
 				/* check if the actual grid can be reduced */
-				if (sizeReduced < grid.size())
-					grid.erase(grid.begin() + sizeReduced, grid.end());
-			}
-
-			void fPrintGrid(const std::vector<detail::_Row>& grid) const {
-				for (const detail::_Row& row : grid) {
-					std::string line;
-					for (size_t i = 0; i < row.size(); ++i) {
-						const detail::_Cell& cell = row[i];
-
-						if (i > 0) {
-							if (cell.kind == detail::CellKind::node && row[i - 1].kind == cell.kind)
-								line.push_back('#');
-							else if (cell.anyLeft())
-								line.push_back('-');
-							else
-								line.push_back(' ');
-						}
-
-						if (cell.kind == detail::CellKind::node)
-							line.push_back('#');
-						else if (cell.lineVertical())
-							line.push_back('|');
-						else if (cell.cornerTop())
-							line.push_back('\'');
-						else if (cell.cornerBottom())
-							line.push_back(',');
-						else if (cell.kind == detail::CellKind::horizontal)
-							line.push_back('-');
-						else
-							line.push_back(' ');
-					}
-
-					str::PrintLn('[', line, ']');
-				}
+				if (sizeReduced < pGrid.size())
+					pGrid.erase(pGrid.begin() + sizeReduced, pGrid.end());
 			}
 
 		public:
-			void draw(const std::vector<detail::Layer>& layers) const {
-				std::vector<detail::_Row> grid = fConstructGrid(layers);
+			std::vector<detail::_Row> build() const {
+				fConstructGrid();
+
+				const auto printGrid = [this]() -> void {
+					std::vector<detail::Layer> layers(pGrid.size());
+					for (const std::string& line : detail::_Renderer{ layers, pGrid }.draw().rows)
+						str::PrintLn('[', line, ']');
+				};
 
 				for (size_t i = 0;; ++i) {
-					while (fStraightenGraph(grid));
-					fShrinkVertical(grid);
+					while (fStraightenGraph());
+					fShrinkVertical();
 
 					if (i >= 40)
 						break;
 
-					fPrintGrid(grid);
+					printGrid();
 
 					/* shifting nodes requires intermediate rows between any two neighboring nodes */
-					if (!fShiftNodes(grid))
+					if (!fShiftNodes())
 						break;
 				}
 
-				fPrintGrid(grid);
+				printGrid();
+
+
+				std::vector<detail::_Row> grid;
+				std::swap(grid, pGrid);
+				return grid;
 			}
 		};
 	}
@@ -1906,8 +1961,8 @@ namespace ascg {
 		}
 		ascg::Graph finalize() const {
 			std::vector<detail::Layer> layers = detail::LayerGraph{}.build(pRanges);
-			detail::_Renderer{}.draw(layers);
-			return detail::Renderer{}.draw(layers);
+			std::vector<detail::_Row> grid = detail::GridBuilder{ layers }.build();
+			return detail::_Renderer{ layers, grid }.draw();
 		}
 	};
 }
