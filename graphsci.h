@@ -1555,7 +1555,7 @@ namespace ascg {
 					return false;
 
 				/* erase the old horizontal and vertical lines and insert the new one */
-				for (size_t i : detail::MinMaxWalk{ x, xCorner, true, true })
+				for (size_t i : detail::MinMaxWalk{ target, xCorner, true, true })
 					grid[y][i].kind = grid[y][i].removeHorizontal();
 				for (size_t i : detail::MinMaxWalk{ y, yCorner, true, true }) {
 					grid[i][xCorner].kind = grid[i][xCorner].removeVertical();
