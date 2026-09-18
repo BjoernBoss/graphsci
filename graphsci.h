@@ -23,7 +23,6 @@
 *	can _Renderer algorithm introduce new crossings? (Prevent!)
 *	update detail::LayoutGraph to default offset preferred positions to be centered
 *
-*	index/other of _Cell are currently not being updated! (remove them?)
 *	make 'layers' part of LayerGraph and make 'grid' part of _Renderer
 *
 *	shrink horizontally
@@ -35,7 +34,7 @@
 
 namespace ascg {
 	/* invalid value for normal node indices; used to identify intermediate rows in the 'ascg::Graph' */
-	static constexpr size_t NoNode = static_cast<size_t>(-1);
+	static constexpr size_t NoNode = std::numeric_limits<size_t>::max();
 
 	/*
 	*	Describes a layered graph made up of: # | - , '
@@ -236,7 +235,8 @@ namespace ascg {
 			size_t index = 0;
 		};
 
-		static constexpr size_t SlotUnused = static_cast<size_t>(-1);
+		/* slot-unused must also be larger than any possible range index */
+		static constexpr size_t SlotUnused = std::numeric_limits<size_t>::max();
 		enum class EntryKind : uint8_t { empty, node, traverse };
 		struct Cell {
 			size_t start = 0;
@@ -1115,7 +1115,7 @@ namespace ascg {
 			}
 		};
 
-		enum class _CellKind : uint8_t {
+		enum class CellKind : uint8_t {
 			empty,
 			node,
 			crossing,
@@ -1127,26 +1127,24 @@ namespace ascg {
 			rightBottom
 		};
 		struct _Cell {
-			size_t index = ascg::NoNode;
-			size_t other = ascg::NoNode;
-			detail::_CellKind kind = detail::_CellKind::empty;
+			detail::CellKind kind = detail::CellKind::empty;
 			bool cornerLeft() const {
-				return (kind == detail::_CellKind::leftTop || kind == detail::_CellKind::leftBottom);
+				return (kind == detail::CellKind::leftTop || kind == detail::CellKind::leftBottom);
 			}
 			bool cornerRight() const {
-				return (kind == detail::_CellKind::rightTop || kind == detail::_CellKind::rightBottom);
+				return (kind == detail::CellKind::rightTop || kind == detail::CellKind::rightBottom);
 			}
 			bool cornerTop() const {
-				return (kind == detail::_CellKind::leftTop || kind == detail::_CellKind::rightTop);
+				return (kind == detail::CellKind::leftTop || kind == detail::CellKind::rightTop);
 			}
 			bool cornerBottom() const {
-				return (kind == detail::_CellKind::leftBottom || kind == detail::_CellKind::rightBottom);
+				return (kind == detail::CellKind::leftBottom || kind == detail::CellKind::rightBottom);
 			}
 			bool lineHorizontal() const {
-				return (kind == detail::_CellKind::crossing || kind == detail::_CellKind::horizontal);
+				return (kind == detail::CellKind::crossing || kind == detail::CellKind::horizontal);
 			}
 			bool lineVertical() const {
-				return (kind == detail::_CellKind::crossing || kind == detail::_CellKind::vertical);
+				return (kind == detail::CellKind::crossing || kind == detail::CellKind::vertical);
 			}
 			bool anyLeft() const {
 				return (cornerLeft() || lineHorizontal());
@@ -1161,33 +1159,33 @@ namespace ascg {
 				return (cornerLeft() || cornerRight());
 			}
 			bool freeHorizontal() const {
-				return (kind == detail::_CellKind::empty || kind == detail::_CellKind::vertical);
+				return (kind == detail::CellKind::empty || kind == detail::CellKind::vertical);
 			}
 			bool freeVertical() const {
-				return (kind == detail::_CellKind::empty || kind == detail::_CellKind::horizontal);
+				return (kind == detail::CellKind::empty || kind == detail::CellKind::horizontal);
 			}
-			detail::_CellKind mirrorVertical() const {
-				if (kind == detail::_CellKind::leftTop)
-					return detail::_CellKind::rightTop;
-				if (kind == detail::_CellKind::rightTop)
-					return detail::_CellKind::leftTop;
-				if (kind == detail::_CellKind::leftBottom)
-					return detail::_CellKind::rightBottom;
-				if (kind == detail::_CellKind::rightBottom)
-					return detail::_CellKind::leftBottom;
+			detail::CellKind mirrorVertical() const {
+				if (kind == detail::CellKind::leftTop)
+					return detail::CellKind::rightTop;
+				if (kind == detail::CellKind::rightTop)
+					return detail::CellKind::leftTop;
+				if (kind == detail::CellKind::leftBottom)
+					return detail::CellKind::rightBottom;
+				if (kind == detail::CellKind::rightBottom)
+					return detail::CellKind::leftBottom;
 				return kind;
 			}
-			detail::_CellKind addHorizontal() const {
-				return (kind == detail::_CellKind::vertical ? detail::_CellKind::crossing : detail::_CellKind::horizontal);
+			detail::CellKind addHorizontal() const {
+				return (kind == detail::CellKind::vertical ? detail::CellKind::crossing : detail::CellKind::horizontal);
 			}
-			detail::_CellKind addVertical() const {
-				return (kind == detail::_CellKind::horizontal ? detail::_CellKind::crossing : detail::_CellKind::vertical);
+			detail::CellKind addVertical() const {
+				return (kind == detail::CellKind::horizontal ? detail::CellKind::crossing : detail::CellKind::vertical);
 			}
-			detail::_CellKind removeHorizontal() const {
-				return (kind == detail::_CellKind::crossing ? detail::_CellKind::vertical : detail::_CellKind::empty);
+			detail::CellKind removeHorizontal() const {
+				return (kind == detail::CellKind::crossing ? detail::CellKind::vertical : detail::CellKind::empty);
 			}
-			detail::_CellKind removeVertical() const {
-				return (kind == detail::_CellKind::crossing ? detail::_CellKind::horizontal : detail::_CellKind::empty);
+			detail::CellKind removeVertical() const {
+				return (kind == detail::CellKind::crossing ? detail::CellKind::horizontal : detail::CellKind::empty);
 			}
 		};
 		using _Row = std::vector<detail::_Cell>;
@@ -1199,7 +1197,7 @@ namespace ascg {
 					if (slice[i] == detail::SlotUnused)
 						row.push_back(detail::_Cell{});
 					else
-						row.push_back(detail::_Cell{ .index = slice[i], .kind = detail::_CellKind::vertical });
+						row.push_back(detail::_Cell{ detail::CellKind::vertical });
 				}
 			}
 			size_t fInsertRotation(std::vector<detail::_Row>& grid, std::vector<size_t>& slice, size_t begin, size_t end, size_t target, size_t where) const {
@@ -1216,11 +1214,10 @@ namespace ascg {
 					fFillTraversals(row, slice, 0, (leftwards ? begin - distance : end - 1));
 
 					/* add the next rotation itself */
-					size_t range = slice[leftwards ? begin : end - 1];
-					row.push_back(detail::_Cell{ .index = range, .kind = (leftwards ? detail::_CellKind::rightBottom : detail::_CellKind::rightTop) });
+					row.push_back(detail::_Cell{ leftwards ? detail::CellKind::rightBottom : detail::CellKind::rightTop });
 					for (size_t i = 1; i < distance; ++i)
-						row.push_back(detail::_Cell{ .index = range, .kind = detail::_CellKind::horizontal });
-					row.push_back(detail::_Cell{ .index = range, .kind = (leftwards ? detail::_CellKind::leftTop : detail::_CellKind::leftBottom) });
+						row.push_back(detail::_Cell{ detail::CellKind::horizontal });
+					row.push_back(detail::_Cell{ leftwards ? detail::CellKind::leftTop : detail::CellKind::leftBottom });
 
 					/* add the traversals after the rotation and update the slice itself and the indices */
 					fFillTraversals(row, slice, (leftwards ? begin + 1 : end + distance), slice.size());
@@ -1264,10 +1261,9 @@ namespace ascg {
 				return where;
 			}
 
-			std::vector<size_t> fConstructNode(const std::vector<detail::Layer>& layers, size_t index, std::vector<detail::_Row>& grid) const {
+			std::map<size_t, size_t> fSetupNodeMap(const std::vector<detail::Layer>& layers, size_t index, size_t width) const {
 				const detail::Layer& layer = layers[index];
-				detail::_Row& row = grid.emplace_back();
-				std::vector<size_t> slice;
+				std::map<size_t, size_t> out;
 
 				/* helper to collect the endpoint ranges and sort them by their
 				*	other side (the other-side ordering is preserved into the grid) */
@@ -1289,60 +1285,64 @@ namespace ascg {
 					return out;
 				};
 
-				/* iterate over the nodes and write them out to the grid and update the slice
-				*	simultaneously (initialize it with the range ids and resolve the indices later) */
+				/* iterate over the nodes and assign each range the index it lies at (identical for both starting and ending) */
+				size_t slotIndex = 0;
 				for (size_t i = 0; i < layer.points.size(); ++i) {
 					const detail::Point& point = layer.points[i];
 
 					/* check if its a simple traversal */
 					if (const detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
-						row.push_back(detail::_Cell{ .index = traverse->range, .kind = detail::_CellKind::vertical });
-						slice.push_back(traverse->range);
+						out[traverse->range] = slotIndex++;
 						continue;
 					}
-
-					/* insert all of the node points to the row */
 					const detail::Node& node = point.node();
-					for (size_t i = std::max<size_t>(node.start.size(), node.end.size()); i > 0; --i)
-						row.push_back(detail::_Cell{ .index = layer.index, .kind = detail::_CellKind::node });
 
-					/* update the slice to contain the sorted ranges starting here and flush the remainder with empty spots */
+					/* update the indices for the starting and ending nodes */
+					size_t endIndex = slotIndex;
 					for (size_t range : sortEndpoints(node.start))
-						slice.push_back(range);
-					while (slice.size() < row.size())
-						slice.push_back(ascg::NoNode);
+						out[range] = slotIndex++;
+					for (size_t range : sortEndpoints(node.end))
+						out[range] = endIndex++;
+					slotIndex = std::max<size_t>(slotIndex, endIndex);
 				}
 
-				/* check if the upcoming layer exists, in which case the ranges
-				*	in the slice need to be converted to actual indices */
-				if (index + 1 >= layers.size())
-					return slice;
-				const detail::Layer& next = layers[index + 1];
+				/* compute the graph shift to center the layer and apply it to the indices */
+				if (size_t shift = (width - slotIndex) / 2; shift > 0) for (auto& [_, slot] : out)
+					slot += shift;
+				return out;
+			}
+			std::vector<size_t> fConstructNode(const std::vector<detail::Layer>& layers, size_t index, std::vector<detail::_Row>& grid, size_t width, std::map<size_t, size_t>& mapping) const {
+				const detail::Layer& layer = layers[index];
 
-				/* setup the map of ranges to indices in the next layer */
-				std::map<size_t, size_t> map;
-				size_t nextIndex = 0;
-				for (const detail::Point& point : next.points) {
+				/* setup the initial slice and row */
+				detail::_Row& row = grid.emplace_back(width, detail::_Cell{});
+				std::vector<size_t> slice(width, detail::SlotUnused);
+
+				/* setup the mapping of the next node (necessary to populate the slice) */
+				std::map<size_t, size_t> upcoming = (index + 1 >= layers.size() ? std::map<size_t, size_t>{} : fSetupNodeMap(layers, index + 1, width));
+
+				/* iterate over the nodes and write them out to the grid and update the slice simultaneously */
+				for (const detail::Point& point : layer.points) {
+					/* check if its a simple traversal */
 					if (const detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
-						map[traverse->range] = nextIndex++;
+						size_t where = mapping[traverse->range];
+						row[where].kind = detail::CellKind::vertical;
+						slice[where] = upcoming[traverse->range];
 						continue;
 					}
-
-					/* insert the nodes sorted by their range and skip the remaining
-					*	mandatory spacing indices for ranges starting at the next layer */
 					const detail::Node& node = point.node();
-					for (size_t range : sortEndpoints(node.end))
-						map[range] = nextIndex++;
-					if (node.start.size() > node.end.size())
-						nextIndex += (node.start.size() - node.end.size());
+
+					/* insert all of the node points to the row (iterate over the larger of the nodes to ensure all cells are filled) */
+					for (const detail::Endpoint& ep : (node.start.size() > node.end.size() ? node.start : node.end))
+						row[mapping[ep.range]].kind = detail::CellKind::node;
+
+					/* update the slice to contain the ranges starting here */
+					for (const detail::Endpoint& ep : node.start)
+						slice[mapping[ep.range]] = upcoming[ep.range];
 				}
 
-				/* convert the ranges in the slice to the indices expected in the next row
-				*	and ensure the slcie is large enough to hold at least the target indices */
-				for (size_t& index : slice)
-					index = (index == ascg::NoNode ? detail::SlotUnused : map[index]);
-				while (slice.size() < nextIndex)
-					slice.push_back(detail::SlotUnused);
+				/* replace the mapping with the mapping of the upcoming node and return the slice */
+				mapping = std::move(upcoming);
 				return slice;
 			}
 			void fConstructAddCrossing(std::vector<detail::_Row>& grid, std::vector<size_t>& slice, size_t index, size_t target) const {
@@ -1353,15 +1353,14 @@ namespace ascg {
 				fFillTraversals(row, slice, 0, std::min<size_t>(index, target));
 
 				/* add the crossing itself */
-				size_t range = slice[index];
-				row.push_back(detail::_Cell{ .index = range, .kind = (leftwards ? detail::_CellKind::rightBottom : detail::_CellKind::rightTop) });
+				row.push_back(detail::_Cell{ leftwards ? detail::CellKind::rightBottom : detail::CellKind::rightTop });
 				for (size_t i : detail::MinMaxWalk{ index, target, true, true }) {
 					if (slice[i] == detail::SlotUnused)
-						row.push_back(detail::_Cell{ .index = range, .kind = detail::_CellKind::horizontal });
+						row.push_back(detail::_Cell{ detail::CellKind::horizontal });
 					else
-						row.push_back(detail::_Cell{ .index = slice[i], .other = range, .kind = detail::_CellKind::crossing });
+						row.push_back(detail::_Cell{ detail::CellKind::crossing });
 				}
-				row.push_back(detail::_Cell{ .index = range, .kind = (leftwards ? detail::_CellKind::leftTop : detail::_CellKind::leftBottom) });
+				row.push_back(detail::_Cell{ leftwards ? detail::CellKind::leftTop : detail::CellKind::leftBottom });
 
 				/* add the traversals after the crossing and update the slice itself */
 				fFillTraversals(row, slice, std::max<size_t>(index, target) + 1, slice.size());
@@ -1471,6 +1470,63 @@ namespace ascg {
 				if (numberOfRows == grid.size())
 					fFillTraversals(grid.emplace_back(), slice, 0, slice.size());
 			}
+			std::vector<detail::_Row> fConstructGrid(const std::vector<detail::Layer>& layers) const {
+				std::vector<detail::_Row> grid;
+				if (layers.empty())
+					return grid;
+
+				/* compute the minimum width to give to the graph (minimum
+				*	required plus maximum number of crossings between two layers) */
+				size_t lastWidth = 0, totalWidth = 0;
+				for (const detail::Layer& layer : layers) {
+					size_t width = layer.points.size(), crossings = 0;
+
+					/* helper to sum up the crossings of the current edge with the previous edges */
+					const auto fetchCrossings = [&layer](size_t until, size_t target) -> size_t {
+						size_t count = 0;
+						for (size_t i = 0; i < until; ++i) {
+							if (const detail::Traverse* traverse = layer.points[i].isTraverse(); traverse != nullptr)
+								count += (traverse->prev > target ? 1 : 0);
+							else for (const detail::Endpoint& ep : layer.points[i].node().end)
+								count += (ep.other > target ? 1 : 0);
+						}
+						return count;
+					};
+
+					/* iterate over all points and update the width due to the node and compute the crossings */
+					for (size_t i = 0; i < layer.points.size(); ++i) {
+						if (const detail::Node* node = layer.points[i].isNode(); node != nullptr) {
+							for (const detail::Endpoint& ep : node->end)
+								crossings += fetchCrossings(i, ep.other);
+							width += std::max<size_t>(node->start.size(), node->end.size()) - 1;
+						}
+						else
+							crossings += fetchCrossings(i, layer.points[i].traverse().prev);
+					}
+
+					/* patch the total width to include the width plus the crossings for both this and the previous layer */
+					totalWidth = std::max<size_t>({ totalWidth, width + crossings, lastWidth + crossings });
+					lastWidth = width;
+				}
+
+				/* fetch the initial node mapping and iterate over the layers and convert
+				*	them to node-rows in the grid and add the intermediate transitions */
+				std::map<size_t, size_t> mapping = fSetupNodeMap(layers, 0, totalWidth);
+				for (size_t i = 0;; ++i) {
+					std::vector<size_t> slice = fConstructNode(layers, i, grid, totalWidth, mapping);
+					if (i + 1 >= layers.size())
+						break;
+					fConstructTransitions(grid, slice);
+				}
+
+				/* flood the entire grid to be rectangular (re-compute the width,
+				*	in case some placement or rotations added additional columns) */
+				for (size_t i = 0; i < grid.size(); ++i)
+					totalWidth = std::max<size_t>(totalWidth, grid[i].size());
+				for (detail::_Row& row : grid)
+					row.resize(totalWidth);
+				return grid;
+			}
 
 			bool fStraightenRemoveNodeBend(std::vector<detail::_Row>& grid, size_t x, size_t y, size_t xCorner, size_t yCorner) const {
 				size_t target = xCorner;
@@ -1481,7 +1537,7 @@ namespace ascg {
 					bool blocked = false;
 
 					/* check if the entire strand is still part of the node and is free to be used */
-					if (grid[yCorner][next].kind != detail::_CellKind::node)
+					if (grid[yCorner][next].kind != detail::CellKind::node)
 						break;
 					for (size_t i : detail::MinMaxWalk{ y, yCorner, true, true }) {
 						if ((blocked = !grid[i][next].freeVertical()))
@@ -1507,8 +1563,8 @@ namespace ascg {
 				}
 
 				/* move the new corner over */
-				grid[y][target].kind = (target == x ? detail::_CellKind::vertical : grid[y][xCorner].kind);
-				grid[y][xCorner].kind = detail::_CellKind::empty;
+				grid[y][target].kind = (target == x ? detail::CellKind::vertical : grid[y][xCorner].kind);
+				grid[y][xCorner].kind = detail::CellKind::empty;
 				return true;
 			}
 			bool fStraightenRemoveCornerRectangle(std::vector<detail::_Row>& grid, size_t x, size_t y, size_t xCorner, size_t yCorner) const {
@@ -1536,7 +1592,7 @@ namespace ascg {
 
 				/* move the new corner over */
 				grid[yCorner][x] = grid[y][x];
-				grid[y][x].kind = detail::_CellKind::vertical;
+				grid[y][x].kind = detail::CellKind::vertical;
 				return true;
 			}
 			bool fStraightenRemoveIndentRectangle(std::vector<detail::_Row>& grid, size_t x, size_t y, size_t xCorner, size_t yCorner) const {
@@ -1580,10 +1636,10 @@ namespace ascg {
 				}
 
 				/* move the corners over */
-				grid[y][target].kind = (target == x ? detail::_CellKind::vertical : grid[y][xCorner].kind);
-				grid[yCorner][target].kind = (grid[yCorner][target].kind != detail::_CellKind::horizontal ? detail::_CellKind::vertical : grid[yCorner][xCorner].kind);
-				grid[y][xCorner].kind = detail::_CellKind::empty;
-				grid[yCorner][xCorner].kind = detail::_CellKind::empty;
+				grid[y][target].kind = (target == x ? detail::CellKind::vertical : grid[y][xCorner].kind);
+				grid[yCorner][target].kind = (grid[yCorner][target].kind != detail::CellKind::horizontal ? detail::CellKind::vertical : grid[yCorner][xCorner].kind);
+				grid[y][xCorner].kind = detail::CellKind::empty;
+				grid[yCorner][xCorner].kind = detail::CellKind::empty;
 				return true;
 			}
 			bool fStraightenGraph(std::vector<detail::_Row>& grid) const {
@@ -1603,7 +1659,7 @@ namespace ascg {
 						else while (grid[--yCorner][xCorner].lineVertical());
 
 						/* check if its one of the existing straightening patterns and try to apply it */
-						if (grid[yCorner][xCorner].kind == detail::_CellKind::node && fStraightenRemoveNodeBend(grid, x, y, xCorner, yCorner))
+						if (grid[yCorner][xCorner].kind == detail::CellKind::node && fStraightenRemoveNodeBend(grid, x, y, xCorner, yCorner))
 							return true;
 						else if (grid[yCorner][xCorner].kind == cell.kind && fStraightenRemoveCornerRectangle(grid, x, y, xCorner, yCorner))
 							return true;
@@ -1616,7 +1672,7 @@ namespace ascg {
 
 			int8_t fShiftCheckPreference(const std::vector<detail::_Row>& grid, size_t y, size_t x, size_t end) const {
 				/* check if the transition actually exists */
-				if (y == end || grid[y = detail::Towards(y, end)][x].kind == detail::_CellKind::empty)
+				if (y == end || grid[y = detail::Towards(y, end)][x].kind == detail::CellKind::empty)
 					return 0;
 
 				/* follow the strand until the first shift to the left or right is encountered */
@@ -1633,13 +1689,13 @@ namespace ascg {
 					detail::_Row& row = grid[y];
 
 					/* check if the row contains a node */
-					size_t first = std::ranges::find(row, detail::_CellKind::node, &detail::_Cell::kind) - row.begin();
+					size_t first = std::ranges::find(row, detail::CellKind::node, &detail::_Cell::kind) - row.begin();
 					if (first >= row.size())
 						continue;
 
 					/* count the preferences of all transitions going out of the node and check if there is a bias */
 					size_t leftShift = 0, rightShift = 0, last = 0;
-					for (size_t i = first; row[i].kind == detail::_CellKind::node; ++i) {
+					for (size_t i = first; row[i].kind == detail::CellKind::node; ++i) {
 						last = i;
 						if (int8_t shift = fShiftCheckPreference(grid, y, i, 0); shift != 0)
 							++(shift < 0 ? leftShift : rightShift);
@@ -1652,7 +1708,7 @@ namespace ascg {
 
 					/* check if the entire grid needs to be widened to accomodate the new shifting of the node */
 					auto shiftIntoRange = std::ranges::subrange(row.begin() + (leftwards ? 0 : last + 1), (leftwards ? row.begin() + first : row.end()));
-					if (!std::ranges::any_of(shiftIntoRange, [](auto v) { return (v == detail::_CellKind::empty); }, &detail::_Cell::kind)) {
+					if (!std::ranges::any_of(shiftIntoRange, [](auto v) { return (v == detail::CellKind::empty); }, &detail::_Cell::kind)) {
 						size_t index = (leftwards ? 0 : row.size());
 
 						/* increase the grid accordingly and patch the indices */
@@ -1667,12 +1723,12 @@ namespace ascg {
 					detail::_Cell temp{};
 					if (leftwards) for (size_t i = last + 1; i > 0; --i) {
 						std::swap(temp, row[i - 1]);
-						if (temp.kind == detail::_CellKind::empty)
+						if (temp.kind == detail::CellKind::empty)
 							break;
 					}
 					else for (size_t i = first; i < row.size(); ++i) {
 						std::swap(temp, row[i]);
-						if (temp.kind == detail::_CellKind::empty)
+						if (temp.kind == detail::CellKind::empty)
 							break;
 					}
 
@@ -1745,9 +1801,9 @@ namespace ascg {
 
 					/* check if the current row either is a node or fully removable */
 					for (const detail::_Cell& cell : grid[i]) {
-						if (cell.kind != detail::_CellKind::empty && cell.kind != detail::_CellKind::vertical)
+						if (cell.kind != detail::CellKind::empty && cell.kind != detail::CellKind::vertical)
 							removable = false;
-						if (cell.kind == detail::_CellKind::node)
+						if (cell.kind == detail::CellKind::node)
 							node = true;
 					}
 
@@ -1782,7 +1838,7 @@ namespace ascg {
 						const detail::_Cell& cell = row[i];
 
 						if (i > 0) {
-							if (cell.kind == detail::_CellKind::node && row[i - 1].kind == cell.kind)
+							if (cell.kind == detail::CellKind::node && row[i - 1].kind == cell.kind)
 								line.push_back('#');
 							else if (cell.anyLeft())
 								line.push_back('-');
@@ -1790,7 +1846,7 @@ namespace ascg {
 								line.push_back(' ');
 						}
 
-						if (cell.kind == detail::_CellKind::node)
+						if (cell.kind == detail::CellKind::node)
 							line.push_back('#');
 						else if (cell.lineVertical())
 							line.push_back('|');
@@ -1798,7 +1854,7 @@ namespace ascg {
 							line.push_back('\'');
 						else if (cell.cornerBottom())
 							line.push_back(',');
-						else if (cell.kind == detail::_CellKind::horizontal)
+						else if (cell.kind == detail::CellKind::horizontal)
 							line.push_back('-');
 						else
 							line.push_back(' ');
@@ -1807,34 +1863,16 @@ namespace ascg {
 					str::PrintLn('[', line, ']');
 				}
 			}
-			void fConstructGrid(const std::vector<detail::Layer>& layers, std::vector<detail::_Row>& grid) const {
-
-				std::vector<size_t> slice;
-				for (size_t i = 0; i < layers.size(); ++i) {
-					if (i > 0)
-						fConstructTransitions(grid, slice);
-					slice = fConstructNode(layers, i, grid);
-				}
-
-
-				/* flood the entire grid to be rectangular (with one additional empty slot as swap space) */
-				size_t width = 0;
-				for (size_t i = 0; i < grid.size(); ++i)
-					width = std::max<size_t>(width, grid[i].size());
-				for (detail::_Row& row : grid)
-					row.resize(width);
-			}
 
 		public:
 			void draw(const std::vector<detail::Layer>& layers) const {
-				std::vector<detail::_Row> grid;
-				fConstructGrid(layers, grid);
+				std::vector<detail::_Row> grid = fConstructGrid(layers);
 
-				for (size_t i = 0; ; ++i) {
+				for (size_t i = 0;; ++i) {
 					while (fStraightenGraph(grid));
 					fShrinkVertical(grid);
 
-					if (i >= 2)
+					if (i >= 40)
 						break;
 
 					fPrintGrid(grid);
@@ -1864,7 +1902,7 @@ namespace ascg {
 				return;
 
 			if (b < ascg::NoNode)
-				pRanges.push_back(detail::Range{ .first = a,.last = b });
+				pRanges.push_back(detail::Range{ .first = a, .last = b });
 		}
 		ascg::Graph finalize() const {
 			std::vector<detail::Layer> layers = detail::LayerGraph{}.build(pRanges);
