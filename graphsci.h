@@ -17,7 +17,7 @@
 #include <ustring/ustring.h>
 /*
 *	add self-loops?/double-edges?/directions?
-*	update grid width to be max-width+number max(crossings) over all transitions
+*	finish layer-builder (cleanup)
 *
 *	merge min-max-walk skip option?
 *	can _Renderer algorithm introduce new crossings? (Prevent!)
@@ -235,19 +235,7 @@ namespace ascg {
 			size_t index = 0;
 		};
 
-		/* slot-unused must also be larger than any possible range index */
-		static constexpr size_t SlotUnused = std::numeric_limits<size_t>::max();
-		enum class EntryKind : uint8_t { empty, node, traverse };
-		struct Cell {
-			size_t start = 0;
-			size_t end = 0;
-			detail::EntryKind kind = detail::EntryKind::empty;
-			bool hasStart = false;
-			bool hasEnd = false;
-		};
-		using Row = std::vector<detail::Cell>;
-
-		class LayerGraph {
+		class LayerBuilder {
 		private:
 			struct Opened {
 				size_t range = 0;
@@ -271,24 +259,29 @@ namespace ascg {
 				}
 			};
 
+		private:
+			const std::vector<detail::Range>& pRanges;
+			mutable std::vector<detail::Layer> pLayers;
+
 		public:
-			LayerGraph() = default;
+			LayerBuilder(const std::vector<detail::Range>& ranges) : pRanges{ ranges } {}
 
 		private:
-			void fConstructLayers(const std::vector<detail::Range>& ranges, std::vector<detail::Layer>& layers) const {
-				if (ranges.empty())
+			void fConstructLayers() const {
+				pLayers.clear();
+				if (pRanges.empty())
 					return;
 
 				/* setup the map of all ranges to their indices (sorted by their start) */
 				std::set<Opened> open;
-				for (size_t i = 0; i < ranges.size(); ++i)
-					open.insert(Opened{ .range = i, .start = ranges[i].first, .end = ranges[i].last });
+				for (size_t i = 0; i < pRanges.size(); ++i)
+					open.insert(Opened{ .range = i, .start = pRanges[i].first, .end = pRanges[i].last });
 
 				/* setup the overall layers and nodes and traverse points */
 				std::optional<size_t> layerNext = open.begin()->start;
 				while (layerNext.has_value()) {
 					/* setup the next layer with the node at index 0 */
-					detail::Layer& layer = layers.emplace_back(detail::Layer{ .index = *layerNext });
+					detail::Layer& layer = pLayers.emplace_back(detail::Layer{ .index = *layerNext });
 					layer.points.push_back(detail::Point{ .body = detail::Node{} });
 					layerNext = std::nullopt;
 
@@ -306,24 +299,24 @@ namespace ascg {
 						layerNext = itNext->start;
 
 					/* check if the previous layer exists in order to be linked up */
-					if (layers.size() <= 1)
+					if (pLayers.size() <= 1)
 						continue;
 
 					/* helper to connect a range to the top layer and ensure proper linkage between the
 					*	layers and to ensure the next assumed layer respects all currently open endings */
-					const auto addRange = [&ranges, &layer, &layerNext](size_t range, size_t index) -> size_t {
-						if (ranges[range].last == layer.index) {
+					const auto addRange = [this, &layer, &layerNext](size_t range, size_t index) -> size_t {
+						if (pRanges[range].last == layer.index) {
 							layer.points[0].node().end.push({ .range = range, .other = index });
 							return 0;
 						}
 						layer.points.push_back(detail::Point{ .body = detail::Traverse{.range = range, .prev = index } });
-						if (!layerNext.has_value() || ranges[range].last < *layerNext)
-							layerNext = ranges[range].last;
+						if (!layerNext.has_value() || pRanges[range].last < *layerNext)
+							layerNext = pRanges[range].last;
 						return layer.points.size() - 1;
 					};
 
 					/* iterate over the previous layer and extend it into the current layer */
-					auto& previous = layers[layers.size() - 2].points;
+					std::vector<detail::Point>& previous = pLayers[pLayers.size() - 2].points;
 					for (size_t i = 0; i < previous.size(); ++i) {
 						if (auto* traverse = previous[i].isTraverse(); traverse != nullptr)
 							traverse->next = addRange(traverse->range, i);
@@ -332,7 +325,7 @@ namespace ascg {
 					}
 				}
 			}
-			void fMovePoint(detail::Point& point, size_t to, std::vector<detail::Layer>& layers, size_t index) const {
+			void fMovePoint(detail::Point& point, size_t to, size_t index) const {
 				/* helper functions to patch the points in the neighboring layers */
 				const auto updatePrevPoint = [](detail::Point& point, size_t range, size_t to) {
 					if (detail::Traverse* traverse = point.isTraverse(); traverse != nullptr)
@@ -355,20 +348,20 @@ namespace ascg {
 
 				/* update the referenced points of the moved point */
 				if (detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
-					updatePrevPoint(layers[index - 1].points[traverse->prev], traverse->range, to);
-					updateNextPoint(layers[index + 1].points[traverse->next], traverse->range, to);
+					updatePrevPoint(pLayers[index - 1].points[traverse->prev], traverse->range, to);
+					updateNextPoint(pLayers[index + 1].points[traverse->next], traverse->range, to);
 					return;
 				}
 				for (detail::Endpoint& ep : point.node().end)
-					updatePrevPoint(layers[index - 1].points[ep.other], ep.range, to);
+					updatePrevPoint(pLayers[index - 1].points[ep.other], ep.range, to);
 				for (detail::Endpoint& ep : point.node().start)
-					updateNextPoint(layers[index + 1].points[ep.other], ep.range, to);
+					updateNextPoint(pLayers[index + 1].points[ep.other], ep.range, to);
 			}
-			size_t fCountCrossings(std::vector<detail::Layer>& layers) const {
+			size_t fCountCrossings() const {
 				size_t count = 0;
 
-				for (size_t i = 1; i < layers.size(); ++i) {
-					const detail::Layer& layer = layers[i];
+				for (size_t i = 1; i < pLayers.size(); ++i) {
+					const detail::Layer& layer = pLayers[i];
 
 					for (size_t j = 0; j < layer.points.size(); ++j) {
 						const detail::Point& point = layer.points[j];
@@ -395,9 +388,9 @@ namespace ascg {
 				}
 				return count;
 			}
-			void fOptimizeLayer(std::vector<detail::Layer>& layers, size_t index) const {
+			void fOptimizeLayer(size_t index) const {
 				std::set<Preferred> preferred;
-				detail::Layer& layer = layers[index];
+				detail::Layer& layer = pLayers[index];
 
 				/* calculate the average position of each point based on its connected neighbors,
 				*	and sort the points new by this given target position (barycenter method) */
@@ -430,691 +423,38 @@ namespace ascg {
 				size_t next = 0;
 				for (auto it = preferred.begin(); it != preferred.end(); ++it) {
 					if (it->index != next)
-						fMovePoint(oldPoints[it->index], next, layers, index);
+						fMovePoint(oldPoints[it->index], next, index);
 					layer.points[next++] = std::move(oldPoints[it->index]);
 				}
 			}
 
 		public:
-			std::vector<detail::Layer> build(const std::vector<detail::Range>& ranges) const {
-				std::vector<detail::Layer> layers;
+			std::vector<detail::Layer> build() const {
+				fConstructLayers();
+				str::PrintLn("Crossings: ", fCountCrossings());
 
-				fConstructLayers(ranges, layers);
-				str::PrintLn("Crossings: ", fCountCrossings(layers));
-
-				if (layers.size() > 2) for (size_t j = 0; j < 8; ++j) {
-					for (size_t i = 1; i < layers.size(); ++i) {
-						fOptimizeLayer(layers, i);
-						str::PrintLn("Crossings: ", fCountCrossings(layers));
+				if (pLayers.size() > 2) for (size_t j = 0; j < 8; ++j) {
+					for (size_t i = 1; i < pLayers.size(); ++i) {
+						fOptimizeLayer(i);
+						str::PrintLn("Crossings: ", fCountCrossings());
 					}
 
-					if (layers.size() < 3)
+					if (pLayers.size() < 3)
 						continue;
 
-					for (size_t i = layers.size() - 1; i > 0; --i) {
-						fOptimizeLayer(layers, i - 1);
-						str::PrintLn("Crossings: ", fCountCrossings(layers));
+					for (size_t i = pLayers.size() - 1; i > 0; --i) {
+						fOptimizeLayer(i - 1);
+						str::PrintLn("Crossings: ", fCountCrossings());
 					}
 				}
 
+				std::vector<detail::Layer> layers;
+				std::swap(pLayers, layers);
 				return layers;
 			}
 		};
-		class Renderer {
-			static constexpr size_t PreferStraightLinesScore = 2;
-		private:
 
-		public:
-			Renderer() = default;
-
-		private:
-			void fMoveStart(std::vector<detail::Row>& grid, size_t index, size_t from, size_t to) const {
-				detail::Cell& cell = grid[index][from];
-
-				/* move the neighbor references themselves and patch the endpoints (other is expected to be empty) */
-				if (cell.hasStart)
-					grid[index + 1][cell.start].end = to;
-				std::swap(grid[index][to].start, cell.start);
-				std::swap(grid[index][to].hasStart, cell.hasStart);
-			}
-			void fMoveEnd(std::vector<detail::Row>& grid, size_t index, size_t from, size_t to) const {
-				detail::Cell& cell = grid[index][from];
-
-				/* move the neighbor references themselves and patch the endpoints (other is expected to be empty) */
-				if (cell.hasEnd)
-					grid[index - 1][cell.end].start = to;
-				std::swap(grid[index][to].end, cell.end);
-				std::swap(grid[index][to].hasEnd, cell.hasEnd);
-			}
-			void fSwapPositions(std::vector<detail::Row>& grid, size_t index, size_t from, size_t to) const {
-				fMoveStart(grid, index, from, to);
-				fMoveEnd(grid, index, from, to);
-
-				/* move the kind over (other is expected to be empty) */
-				std::swap(grid[index][to].kind, grid[index][from].kind);
-			}
-
-			void fConstructBasicGrid(const std::vector<detail::Layer>& layers, std::vector<detail::Row>& grid) const {
-				std::map<size_t, size_t> map;
-				size_t width = 0;
-
-				/* construct the initial grid of plainly placed rows */
-				for (const detail::Layer& layer : layers) {
-					detail::Row& row = grid.emplace_back();
-					row.reserve(width);
-
-					/* iterate over the points and expand them and patch up the indices of the previous row */
-					std::map<size_t, size_t> tMap;
-					for (const detail::Point& point : layer.points) {
-						/* place all traversing ranges */
-						if (const detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
-							size_t index = row.size();
-							detail::Cell& cell = row.emplace_back();
-
-							/* configure and link up the next cell */
-							cell.hasStart = true;
-							cell.end = map[traverse->range];
-							cell.hasEnd = true;
-							cell.kind = detail::EntryKind::traverse;
-							grid[grid.size() - 2][cell.end].start = index;
-							tMap[traverse->range] = index;
-							continue;
-						}
-
-						/* helper to collect the endpoint ranges and sort them by their
-						*	other side (the other-side ordering is preserved into the grid) */
-						const auto sortEndpoints = [](const detail::Endpoints& eps) -> std::vector<size_t> {
-							const detail::Endpoint* list = eps.begin();
-							std::vector<size_t> out;
-
-							/* initially collect the indices and sort on them */
-							out.reserve(eps.size());
-							for (size_t i = 0; i < eps.size(); ++i)
-								out.push_back(i);
-							std::sort(out.begin(), out.end(), [list](size_t f, size_t s) -> bool {
-								return ((list[f].other != list[s].other) ? (list[f].other < list[s].other) : (f < s));
-							});
-
-							/* convert the indices back to the actual ranges */
-							for (size_t& val : out)
-								val = list[val].range;
-							return out;
-						};
-
-						/* place all starting ranges sorted by their other side */
-						const detail::Node& node = point.node();
-						size_t nodeIndex = row.size(), intoNode = 0;
-						for (size_t range : sortEndpoints(node.start)) {
-							detail::Cell& cell = row.emplace_back();
-
-							/* configure the next cell's start */
-							cell.hasStart = true;
-							cell.kind = detail::EntryKind::node;
-							tMap[range] = nodeIndex + intoNode++;
-						}
-
-						/* place all ending ranges sorted by their other side */
-						for (size_t range : sortEndpoints(node.end)) {
-							detail::Cell& cell = (nodeIndex < row.size() ? row[nodeIndex] : row.emplace_back());
-
-							/* configure the next cell's end */
-							cell.end = map[range];
-							cell.hasEnd = true;
-							cell.kind = detail::EntryKind::node;
-							grid[grid.size() - 2][cell.end].start = nodeIndex++;
-						}
-					}
-					map = std::move(tMap);
-
-					/* update the expected min-width (to reduce the number of allocations per row) */
-					width = std::max<size_t>(width, row.size());
-				}
-			}
-			void fConstructGrid(const std::vector<detail::Layer>& layers, std::vector<detail::Row>& grid) const {
-				fConstructBasicGrid(layers, grid);
-
-				/* flood the entire grid to be rectangular (with one additional empty slot as swap space) */
-				size_t width = 0;
-				for (size_t i = 0; i < grid.size(); ++i)
-					width = std::max<size_t>(width, grid[i].size() + 2);
-				for (detail::Row& row : grid)
-					row.resize(width);
-			}
-			void fLayoutRow(std::vector<detail::Row>& grid, size_t index) const {
-				detail::Row& row = grid[index];
-
-				/* helper to compute old and new score if the given cell were to be moved */
-				const auto computeScore = [&row](size_t oldIndex, size_t nextIndex) -> std::pair<size_t, size_t> {
-					const auto distance = [](size_t s, size_t t) -> size_t { return (s < t ? (t - s) : (s - t)); };
-					const auto pow2 = [](size_t v) -> size_t { return v * v; };
-
-					size_t sOld = 0, eOld = 0, sNext = 0, eNext = 0;
-					if (row[oldIndex].hasStart) {
-						sOld += pow2(distance(oldIndex, row[oldIndex].start));
-						sNext += pow2(distance(nextIndex, row[oldIndex].start));
-						if (sOld == 0 || sNext == 0)
-							(sOld == 0 ? sNext : sOld) += PreferStraightLinesScore;
-					}
-					if (row[oldIndex].hasEnd) {
-						eOld += pow2(distance(oldIndex, row[oldIndex].end));
-						eNext += pow2(distance(nextIndex, row[oldIndex].end));
-						if (eOld == 0 || eNext == 0)
-							(eOld == 0 ? eNext : eOld) += PreferStraightLinesScore;
-					}
-					return { sOld + eOld, sNext + eNext };
-				};
-
-				/* helper to determine which endpoint to move into the node slot */
-				const auto computeNodeMove = [&row](size_t* lOther, size_t* rOther, size_t index) -> size_t {
-					size_t left = ((lOther != nullptr && *lOther >= index) ? (*lOther - (index - 1)) : 0);
-					size_t right = ((rOther != nullptr && *rOther <= index) ? ((index + 1) - *rOther) : 0);
-
-					/* check which side would benefit more from being moved into the empty spot */
-					if (left == 0 && right == 0)
-						return index;
-					if (left == right)
-						(index * 2 <= row.size() ? left : right) = 0;
-					return (left > right ? index - 1 : index + 1);
-				};
-
-				/* iterate until no more changes are applied to the row */
-				bool dirty = true;
-				while (dirty) {
-					dirty = false;
-
-					/* look for empty slots and check if it should be filled up from left or right */
-					size_t firstNode = row.size();
-					for (size_t i = 0; i < row.size(); ++i) {
-						detail::Cell& cell = row[i];
-
-						/* check if this is the first node index and otherwise check if its empty and can be consumed */
-						if (cell.kind != detail::EntryKind::empty) {
-							if (cell.kind == detail::EntryKind::node && firstNode >= row.size())
-								firstNode = i;
-							continue;
-						}
-						size_t bestDiff = 0, bestIndex = i;
-
-						/* iterate over the right and compute their score if they were to be moved one down */
-						size_t old = 0, next = 0;
-						for (size_t j = i + 1; j < row.size(); ++j) {
-							if (row[j].kind == detail::EntryKind::empty) break;
-							const auto [_old, _next] = computeScore(j, j - 1);
-							old += _old, next += _next;
-
-							/* check if the new move would be even more effective
-							*	in reducing the score than the previous selection */
-							if (next < old && (bestDiff == 0 || old - next > bestDiff) && (row[j].kind != detail::EntryKind::node || j + 1 >= row.size() || row[j + 1].kind != detail::EntryKind::node))
-								bestDiff = (old - next), bestIndex = j;
-						}
-
-						/* iterate over the left and compute their score if they were to be moved one up */
-						old = 0, next = 0;
-						for (size_t j = i; j > 0; --j) {
-							if (row[j - 1].kind == detail::EntryKind::empty) break;
-							const auto [_old, _next] = computeScore(j - 1, j);
-							old += _old, next += _next;
-
-							/* check if the new move would be even more effective
-							*	in reducing the score than the previous selection */
-							if (next < old && (bestDiff == 0 || old - next > bestDiff) && (row[j - 1].kind != detail::EntryKind::node || j <= 1 || row[j - 2].kind != detail::EntryKind::node))
-								bestDiff = (old - next), bestIndex = j - 1;
-						}
-
-						/* check if a move was selected to fill the next spot with */
-						if (bestDiff == 0)
-							continue;
-
-						/* rotate the new points into position */
-						if (bestIndex < i) for (size_t j = i; j > bestIndex; --j)
-							fSwapPositions(grid, index, j - 1, j);
-						else for (size_t j = i + 1; j <= bestIndex; ++j)
-							fSwapPositions(grid, index, j, j - 1);
-						dirty = true;
-						break;
-					}
-					if (dirty)
-						continue;
-
-					/* check if there is a vacant spot on the node, which can be filled by another
-					*	connection (no need to check any contiguous neighbors, as the node outputs are
-					*	sorted, hence if the neighbors profit from moving, so does the first entry) */
-					for (size_t i = firstNode; i < row.size() && row[i].kind == detail::EntryKind::node; ++i) {
-						bool leftNode = (i > 0 && row[i - 1].kind == detail::EntryKind::node);
-						bool rightNode = (i + 1 < row.size() && row[i + 1].kind == detail::EntryKind::node);
-						if (!leftNode && !rightNode)
-							continue;
-						detail::Cell& cell = row[i];
-
-						/* check if the start is vacant and check if neigbors would benefit from being placed here */
-						if (!cell.hasStart) {
-							size_t* lOther = (leftNode && row[i - 1].hasStart ? &row[i - 1].start : nullptr);
-							size_t* rOther = (rightNode && row[i + 1].hasStart ? &row[i + 1].start : nullptr);
-							if (size_t from = computeNodeMove(lOther, rOther, i); from != i) {
-								fMoveStart(grid, index, from, i);
-								dirty = true;
-							}
-						}
-
-						/* check if the end is vacant and check if neigbors would benefit from being placed here */
-						if (!cell.hasEnd) {
-							size_t* lOther = (leftNode && row[i - 1].hasEnd ? &row[i - 1].end : nullptr);
-							size_t* rOther = (rightNode && row[i + 1].hasEnd ? &row[i + 1].end : nullptr);
-							if (size_t from = computeNodeMove(lOther, rOther, i); from != i) {
-								fMoveEnd(grid, index, from, i);
-								dirty = true;
-							}
-						}
-
-						if (dirty)
-							break;
-					}
-				}
-			}
-
-			struct SwapMatch {
-				size_t index = 0;
-				size_t target = 0;
-				size_t rotate = 0;
-				bool leftRotate = false;
-			};
-			std::optional<SwapMatch> fFindNextSwap(std::vector<size_t>& slice) const {
-				size_t bestIndex = 0, bestSkip = 0, bestTarget = 0;
-				bool bestCanMove = false, bestMoveLeft = false;
-
-				/* helper to compare moves and decide which one leaves the slice in a
-				*	better state (assuming the can-move has already been decided) */
-				const auto testNextOption = [&bestSkip, &bestIndex, &bestTarget, &slice](size_t skip, size_t index, size_t target) -> bool {
-					if (skip != bestSkip)
-						return (skip > bestSkip);
-					size_t bDist = (slice[bestIndex] < bestTarget ? (bestTarget - slice[bestIndex]) : (slice[bestIndex] - bestTarget));
-					size_t nDist = (slice[index] < target ? (target - slice[index]) : (slice[index] - target));
-					return (nDist < bDist);
-				};
-
-				/* find the next entry which can already move or which has to move the furthest */
-				for (size_t i = 0; i < slice.size(); ++i) {
-					if (slice[i] == detail::SlotUnused)
-						continue;
-					size_t leftSkip = 0, leftTarget = 0, rightSkip = 0, rightTarget = 0;
-
-					/* count the number of connections to skip to move it in order
-					*	and check if the entry is already positioned correctly */
-					for (size_t j = i; j > 0; --j) {
-						if (slice[j - 1] == detail::SlotUnused) continue;
-						if (slice[j - 1] < slice[i]) break;
-						++leftSkip;
-						leftTarget = j - 1;
-					}
-					for (size_t j = i + 1; j < slice.size(); ++j) {
-						if (slice[j] == detail::SlotUnused) continue;
-						if (slice[j] > slice[i]) break;
-						++rightSkip;
-						rightTarget = j;
-					}
-					if (leftSkip == 0 && rightSkip == 0)
-						continue;
-
-					/* check if any of the two positions can already move */
-					bool leftCanMove = (leftSkip > 0 && leftTarget > 0 && slice[leftTarget - 1] == detail::SlotUnused);
-					bool rightCanMove = (rightSkip > 0 && rightTarget + 1 < slice.size() && slice[rightTarget + 1] == detail::SlotUnused);
-
-					/* check if the left direction is better than the current best */
-					if (leftSkip > 0 && ((leftCanMove && !bestCanMove) || (leftCanMove == bestCanMove && testNextOption(leftSkip, i, leftTarget)))) {
-						bestIndex = i;
-						bestSkip = leftSkip;
-						bestTarget = leftTarget;
-						bestCanMove = leftCanMove;
-						bestMoveLeft = true;
-					}
-
-					/* check if the right direction is better than the current best */
-					if (rightSkip > 0 && ((rightCanMove && !bestCanMove) || (rightCanMove == bestCanMove && testNextOption(rightSkip, i, rightTarget)))) {
-						bestIndex = i;
-						bestSkip = rightSkip;
-						bestTarget = rightTarget;
-						bestCanMove = rightCanMove;
-						bestMoveLeft = false;
-					}
-				}
-
-				/* check if no swap was found or if it can be moved immediately */
-				if (bestSkip == 0)
-					return std::nullopt;
-				if (bestCanMove)
-					return SwapMatch{ .index = bestIndex, .target = (bestMoveLeft ? bestTarget - 1 : bestTarget + 1) };
-
-				/* shift the target for right movements, as this reduces
-				*	the off-by-one patching for the upcoming loops */
-				if (!bestMoveLeft)
-					++bestTarget;
-
-				/* find the next possible empty slot in either direction,
-				*	and count the number of moves it would require */
-				size_t leftMove = 0, rightMove = 0;
-				for (size_t i = bestTarget + 1; i < slice.size(); ++i) {
-					if (slice[i] != detail::SlotUnused) continue;
-					rightMove = i - bestTarget;
-					break;
-				}
-				for (size_t i = bestTarget; i > 0; --i) {
-					if (slice[i - 1] != detail::SlotUnused) continue;
-					leftMove = bestTarget - i;
-					break;
-				}
-
-				/* configure the swap state accordingly to use the direction with least amount of rotation
-				*	necessary (one must exist, as each row is guaranteed to have at least one empty spot) */
-				SwapMatch output{ .index = bestIndex, .target = bestTarget };
-				if ((leftMove > 0 && leftMove <= rightMove) || rightMove == 0) {
-					output.rotate = leftMove;
-					output.leftRotate = true;
-					--output.target;
-				}
-				else {
-					output.rotate = rightMove;
-					output.leftRotate = false;
-				}
-
-				/* check if the rotation will also move the source index itself, in
-				*	which case it must be updated to mark the source after the shift */
-				if (output.target < output.index && !output.leftRotate && output.target + output.rotate > output.index)
-					++output.index;
-				else if (output.target > output.index && output.leftRotate && output.target - output.rotate < output.index)
-					--output.index;
-				return output;
-			}
-			std::vector<size_t> fMakeSlice(detail::Row& row, bool forward) const {
-				std::vector<size_t> slice;
-				slice.reserve(row.size());
-
-				/* iterate over the entries of the row, and create the slice of positions
-				*	representing the transitions moving away from one end of the row */
-				for (size_t i = 0; i < row.size(); ++i) {
-					if (forward && row[i].hasStart)
-						slice.push_back(row[i].start);
-					else if (!forward && row[i].hasEnd)
-						slice.push_back(row[i].end);
-					else
-						slice.push_back(detail::SlotUnused);
-				}
-				return slice;
-			}
-
-
-			void fUpdateAlignment(std::vector<detail::Row>& grid, size_t index, bool forward) const {
-				if (forward ? (index + 1 >= grid.size()) : (index == 0))
-					return;
-				detail::Row& row = grid[index];
-				detail::Row& other = grid[forward ? index + 1 : index - 1];
-
-				/* create the initial slice and apply all necessary swappings to the slice */
-				std::vector<size_t> slice = fMakeSlice(row, forward);
-				while (true) {
-					/* find the next swap to be performed (if none has been found, the ordering is already correct) */
-					std::optional<SwapMatch> swap = fFindNextSwap(slice);
-					if (!swap.has_value())
-						break;
-
-					/* apply the rotation and the final swap-move */
-					if (swap->leftRotate) for (size_t i = swap->target - swap->rotate; i < swap->target; ++i)
-						std::swap(slice[i], slice[i + 1]);
-					else for (size_t i = swap->target + swap->rotate; i > swap->target; --i)
-						std::swap(slice[i], slice[i - 1]);
-					std::swap(slice[swap->index], slice[swap->target]);
-				}
-
-
-				/* vvvv node-placement vvvv */
-				size_t otherNodeStart = 0, otherNodeSize = 0;
-				for (size_t i = 0; i < other.size(); ++i) {
-					if (otherNodeSize > 0) {
-						if (other[i].kind != detail::EntryKind::node)
-							break;
-						++otherNodeSize;
-					}
-					else if (other[i].kind == detail::EntryKind::node)
-						otherNodeSize = 1;
-					else if (forward ? other[i].hasEnd : other[i].hasStart)
-						++otherNodeStart;
-				}
-
-				size_t isStart = 0, isEnd = 0;
-				while (otherNodeStart > 0) {
-					if (slice[isStart++] != detail::SlotUnused)
-						--otherNodeStart;
-				}
-				isEnd = isStart;
-				while (isStart > 0 && (slice[isStart - 1] == detail::SlotUnused || other[slice[isStart - 1]].kind == detail::EntryKind::node))
-					--isStart;
-				while (isEnd < slice.size() && (slice[isEnd] == detail::SlotUnused || other[slice[isEnd]].kind == detail::EntryKind::node))
-					++isEnd;
-
-				while (isEnd - isStart > otherNodeSize) {
-					size_t leftUsed = 0, rightUsed = 0;
-					while (slice[isStart + leftUsed] != detail::SlotUnused)
-						++leftUsed;
-					while (slice[isEnd - rightUsed - 1] != detail::SlotUnused)
-						++rightUsed;
-
-					if (leftUsed <= rightUsed) {
-						for (size_t i = isStart + leftUsed; i > isStart; --i)
-							std::swap(slice[i], slice[i - 1]);
-						++isStart;
-					}
-					else {
-						for (size_t i = isEnd - rightUsed; i < isEnd; ++i)
-							std::swap(slice[i - 1], slice[i]);
-						--isEnd;
-					}
-				}
-				while (isEnd - isStart < otherNodeSize) {
-					size_t leftMove = 0, rightMove = 0;
-					for (size_t i = isStart; i > 0; --i) {
-						if (slice[i - 1] != detail::SlotUnused) continue;
-						leftMove = (isStart - i);
-						break;
-					}
-					for (size_t i = isEnd; i < slice.size(); ++i) {
-						if (slice[i] != detail::SlotUnused) continue;
-						rightMove = (i - isEnd);
-						break;
-					}
-
-					if ((leftMove > 0 && leftMove <= rightMove) || rightMove == 0) {
-						for (size_t i = isStart - leftMove; i < isStart; ++i)
-							std::swap(slice[i - 1], slice[i]);
-						--isStart;
-					}
-					else {
-						for (size_t i = isEnd + rightMove; i > isEnd; --i)
-							std::swap(slice[i], slice[i - 1]);
-						++isEnd;
-					}
-				}
-				/* ^^^^ node-placement ^^^^ */
-
-				/* vvvv layout-adjustments vvvv */
-				for (size_t i = 0; i < slice.size(); ++i) {
-					bool node = (i >= isStart && i < isEnd);
-					bool used = (slice[i] != detail::SlotUnused);
-					detail::EntryKind kind = (node ? detail::EntryKind::node : (used ? detail::EntryKind::traverse : detail::EntryKind::empty));
-
-					if (other[i].kind == kind)
-						continue;
-
-					size_t source = i + 1;
-					while (other[source].kind != kind)
-						++source;
-					while (source > i) {
-						if (other[source].kind == detail::EntryKind::empty)
-							fSwapPositions(grid, (forward ? index + 1 : index - 1), source - 1, source);
-						else
-							fSwapPositions(grid, (forward ? index + 1 : index - 1), source, source - 1);
-						--source;
-					}
-				}
-				/* ^^^^ layout-adjustments ^^^^ */
-			}
-
-			void fDrawRow(detail::Row& row, ascg::Graph& graph, size_t node) const {
-				/* update the mapping and allocate the next string line (as the graph will end in a node, each
-				*	node can just flush the map to the same size as the node, and the map will match in size) */
-				while (graph.map.size() < graph.rows.size())
-					graph.map.push_back(ascg::NoNode);
-				graph.map.push_back(node);
-				std::string& line = graph.rows.emplace_back();
-
-				/* iterate over the slots of the row and draw them to the string
-				*	line (with the double-extent to match the graph dimensions) */
-				for (size_t i = 0; i < row.size(); ++i) {
-					if (i > 0)
-						line.push_back((row[i - 1].kind == detail::EntryKind::node && row[i].kind == detail::EntryKind::node) ? '#' : ' ');
-
-					/* draw the node or connection itself */
-					if (row[i].kind == detail::EntryKind::node)
-						line.push_back('#');
-					else if (row[i].kind == detail::EntryKind::traverse)
-						line.push_back('|');
-					else
-						line.push_back(' ');
-				}
-			}
-			void fDrawTransition(detail::Row& row, ascg::Graph& graph) const {
-				size_t startOfLines = graph.rows.size();
-
-				/* construct the slice to propagate the changes through */
-				std::vector<size_t> slice = fMakeSlice(row, true);
-
-				const auto addTransitions = [&slice](size_t begin, size_t end, std::string& line) -> void {
-					for (size_t i = begin; i < end; ++i) {
-						if (i > 0)
-							line.push_back(' ');
-						line.push_back(slice[i] == detail::SlotUnused ? ' ' : '|');
-					}
-				};
-
-				/* add all rotations and swaps */
-				while (true) {
-					std::optional<SwapMatch> swap = fFindNextSwap(slice);
-					if (!swap.has_value())
-						break;
-
-					size_t next = (swap->leftRotate ? (swap->target - swap->rotate) : (swap->target + swap->rotate - 1));
-					for (size_t i = 0; i < swap->rotate; ++i) {
-						std::string& line = graph.rows.emplace_back();
-
-						addTransitions(0, next, line);
-
-						if (next > 0)
-							line.push_back(' ');
-						line.append(swap->leftRotate ? ",-'" : "'-,");
-						std::swap(slice[next], slice[next + 1]);
-
-						addTransitions(next + 2, slice.size(), line);
-
-						if (swap->leftRotate)
-							++next;
-						else
-							--next;
-					}
-
-					std::string& line = graph.rows.emplace_back();
-					addTransitions(0, std::min<size_t>(swap->index, swap->target), line);
-
-					if (swap->index > 0 && swap->target > 0)
-						line.push_back(' ');
-					line.push_back((swap->index < swap->target) ? '\'' : ',');
-					for (size_t i = std::min<size_t>(swap->index, swap->target) + 1; i < std::max<size_t>(swap->index, swap->target); ++i)
-						line.append(slice[i] == detail::SlotUnused ? "--" : "-|");
-					line.append((swap->index < swap->target) ? "-," : "-'");
-
-					std::swap(slice[swap->index], slice[swap->target]);
-
-					addTransitions(std::max<size_t>(swap->index, swap->target) + 1, slice.size(), line);
-				}
-
-				/* align all entries with their target */
-				while (true) {
-					/* find the next mis-placed entry, which can be moved to its new placement */
-					size_t next = 0;
-					for (; next < slice.size(); ++next) {
-						if (slice[next] == detail::SlotUnused || slice[next] == next)
-							continue;
-
-						/* check if the entire range is usable */
-						bool blocked = false;
-						for (size_t i = std::min<size_t>(next, slice[next]); i <= std::max<size_t>(next, slice[next]); ++i) {
-							if (i == next || slice[i] == detail::SlotUnused)
-								continue;
-							blocked = true;
-							break;
-						}
-						if (!blocked)
-							break;
-					}
-
-					/* check if nothing needs to be done (all slices are already well ordered) */
-					if (next == slice.size()) {
-						if (graph.rows.size() == startOfLines)
-							addTransitions(0, slice.size(), graph.rows.emplace_back());
-						break;
-					}
-					std::string& line = graph.rows.emplace_back();
-
-					/* fill in the intermediate slots */
-					size_t base = std::min<size_t>(next, slice[next]);
-					size_t end = std::max<size_t>(next, slice[next]);
-					addTransitions(0, base, line);
-
-					/* add the move itself */
-					if (base > 0)
-						line.push_back(' ');
-					line.push_back((base == next) ? '\'' : ',');
-					for (size_t i = base + 1; i < end; ++i)
-						line.append(slice[i] == detail::SlotUnused ? "--" : "-|");
-					line.append((base == next) ? "-," : "-'");
-
-					size_t other = slice[next];
-					std::swap(slice[other], slice[next]);
-					addTransitions(end + 1, slice.size(), line);
-				}
-			}
-
-		public:
-			ascg::Graph draw(const std::vector<detail::Layer>& layers) const {
-				ascg::Graph graph{};
-
-				std::vector<detail::Row> grid;
-
-				fConstructGrid(layers, grid);
-
-				//for (size_t i = 0; i < 40; ++i) {
-				//	for (size_t j = 0; j < grid.size(); ++j)
-				//		fUpdateAlignment(grid, j, true);
-				//	for (size_t j = grid.size(); j > 0; --j)
-				//		fUpdateAlignment(grid, j - 1, false);
-				//}
-				//for (size_t j = 0; j < grid.size(); ++j)
-				//	fUpdateAlignment(grid, j, true);
-
-
-				//for (size_t i = 0; i < 8; ++i) {
-				//	for (size_t j = 0; j < grid.size(); ++j)
-				//		fLayoutRow(grid, j);
-				//	for (size_t j = grid.size(); j > 0; --j)
-				//		fLayoutRow(grid, j - 1);
-				//}
-
-				for (size_t i = 0; i < grid.size(); ++i) {
-					fDrawRow(grid[i], graph, layers[i].index);
-					if (i + 1 < grid.size())
-						fDrawTransition(grid[i], graph);
-				}
-				return graph;
-			}
-		};
-
+		static constexpr size_t SlotUnused = std::numeric_limits<size_t>::max();
 		enum class CellKind : uint8_t {
 			empty,
 			node,
@@ -1936,7 +1276,7 @@ namespace ascg {
 
 
 				std::vector<detail::_Row> grid;
-				std::swap(grid, pGrid);
+				std::swap(pGrid, grid);
 				return grid;
 			}
 		};
@@ -1960,7 +1300,7 @@ namespace ascg {
 				pRanges.push_back(detail::Range{ .first = a, .last = b });
 		}
 		ascg::Graph finalize() const {
-			std::vector<detail::Layer> layers = detail::LayerGraph{}.build(pRanges);
+			std::vector<detail::Layer> layers = detail::LayerBuilder{ pRanges }.build();
 			std::vector<detail::_Row> grid = detail::GridBuilder{ layers }.build();
 			return detail::_Renderer{ layers, grid }.draw();
 		}
