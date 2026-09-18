@@ -20,7 +20,7 @@
 *	add self-loops?/double-edges?/directions?
 *	finish layer-builder (cleanup)
 *
-*	can _Renderer algorithm introduce new crossings? (Prevent!)
+*	only shift nodes with highest score
 *	update detail::LayoutGraph to default offset preferred positions to be centered
 *
 *	shrink horizontally
@@ -48,7 +48,6 @@ namespace ascg {
 		std::vector<size_t> map;
 	};
 
-
 	namespace detail {
 		struct MinMaxWalk {
 		public:
@@ -65,8 +64,8 @@ namespace ascg {
 			size_t last = 0;
 
 		public:
-			MinMaxWalk(size_t a, size_t b, bool skipEnds) : first{ std::min(a, b) }, last{ std::max(a, b) } {
-				if (skipEnds) {
+			MinMaxWalk(size_t a, size_t b, bool exclusive) : first{ std::min(a, b) }, last{ std::max(a, b) } {
+				if (exclusive) {
 					if (++first < last)
 						--last;
 					else
@@ -526,7 +525,7 @@ namespace ascg {
 		};
 		using Row = std::vector<detail::Cell>;
 
-		/* temporary */
+		/* temporary - should be moved after the GridBuilder */
 		class _Renderer {
 		private:
 			const std::vector<detail::Layer>& pLayers;
@@ -939,6 +938,23 @@ namespace ascg {
 			}
 
 		private:
+			size_t fCountPathCrossings(size_t x, size_t y, size_t other, bool horizontal, bool future) const {
+				size_t count = 0;
+
+				/* select the value to be walked across the grid and the kind, which
+				*	either is a crossing, or would result in a crossing in the future */
+				size_t& walker = (horizontal ? x : y);
+				detail::CellKind critical = (future
+					? (horizontal ? detail::CellKind::vertical : detail::CellKind::horizontal)
+					: detail::CellKind::crossing);
+
+				/* walk across the exclusive range and count the number of critical kind encounters */
+				while ((walker = detail::Towards(walker, other)) != other) {
+					if (pGrid[y][x].kind == critical)
+						++count;
+				}
+				return count;
+			}
 			bool fStraightenRemoveNodeBend(size_t x, size_t y, size_t xCorner, size_t yCorner) const {
 				size_t target = xCorner;
 
@@ -965,6 +981,14 @@ namespace ascg {
 				if (target == xCorner)
 					return false;
 
+				/* count the current number of crossings and upcoming number of
+				*	crossings to ensure the transformation does not induce more */
+				size_t current = fCountPathCrossings(target, y, xCorner, true, false)
+					+ fCountPathCrossings(xCorner, yCorner, y, false, false);
+				size_t future = fCountPathCrossings(target, y, yCorner, false, true);
+				if (current < future)
+					return false;
+
 				/* erase the old horizontal and vertical lines and insert the new one */
 				for (size_t i : detail::MinMaxWalk{ target, xCorner, true })
 					pGrid[y][i].kind = pGrid[y][i].removeHorizontal();
@@ -979,20 +1003,33 @@ namespace ascg {
 				return true;
 			}
 			bool fStraightenRemoveCornerRectangle(size_t x, size_t y, size_t xCorner, size_t yCorner) const {
+				/* ensure that the new corner is free */
+				if (pGrid[yCorner][x].kind != detail::CellKind::empty)
+					return false;
+
 				/* check if the extension of the horizontal axis at the crossing to the new corner is free */
-				for (size_t i : detail::MinMaxWalk{ x, detail::Towards(xCorner, x), false }) {
+				for (size_t i : detail::MinMaxWalk{ x, xCorner, true }) {
 					if (!pGrid[yCorner][i].freeHorizontal())
 						return false;
 				}
 
 				/* check if the extension of the original axis can freely get next to the corner */
-				for (size_t i : detail::MinMaxWalk{ yCorner, detail::Towards(y, yCorner), false }) {
+				for (size_t i : detail::MinMaxWalk{ y, yCorner, true }) {
 					if (!pGrid[i][x].freeVertical())
 						return false;
 				}
 
+				/* count the current number of crossings and upcoming number of
+				*	crossings to ensure the transformation does not induce more */
+				size_t current = fCountPathCrossings(x, y, xCorner, true, false)
+					+ fCountPathCrossings(xCorner, yCorner, y, false, false);
+				size_t future = fCountPathCrossings(x, y, yCorner, false, true)
+					+ fCountPathCrossings(xCorner, yCorner, x, true, true);
+				if (current < future)
+					return false;
+
 				/* erase the old horizontal and vertical lines and insert the new ones */
-				for (size_t i : detail::MinMaxWalk{ xCorner, detail::Towards(x, xCorner), false }) {
+				for (size_t i : detail::MinMaxWalk{ x, xCorner, true }) {
 					pGrid[y][i].kind = pGrid[y][i].removeHorizontal();
 					pGrid[yCorner][i].kind = pGrid[yCorner][i].addHorizontal();
 				}
@@ -1001,9 +1038,11 @@ namespace ascg {
 					pGrid[i][x].kind = pGrid[i][x].addVertical();
 				}
 
-				/* move the new corner over */
+				/* move the new corner over and patch the old corners */
 				pGrid[yCorner][x] = pGrid[y][x];
 				pGrid[y][x].kind = detail::CellKind::vertical;
+				pGrid[yCorner][xCorner].kind = detail::CellKind::horizontal;
+				pGrid[y][xCorner].kind = detail::CellKind::empty;
 				return true;
 			}
 			bool fStraightenRemoveIndentRectangle(size_t x, size_t y, size_t xCorner, size_t yCorner) const {
@@ -1035,6 +1074,15 @@ namespace ascg {
 					if (target == xCorner)
 						return false;
 				}
+
+				/* count the current number of crossings and upcoming number of
+				*	crossings to ensure the transformation does not induce more */
+				size_t current = fCountPathCrossings(target, y, xCorner, true, false)
+					+ fCountPathCrossings(target, yCorner, xCorner, true, false)
+					+ fCountPathCrossings(xCorner, y, yCorner, false, false);
+				size_t future = fCountPathCrossings(target, y, yCorner, false, true);
+				if (current < future)
+					return false;
 
 				/* erase the old horizontal and vertical lines and insert the new ones */
 				for (size_t i : detail::MinMaxWalk{ target, xCorner, true }) {
