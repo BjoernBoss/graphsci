@@ -499,6 +499,17 @@ namespace ascg {
 			bool freeVertical() const {
 				return (kind == detail::CellKind::empty || kind == detail::CellKind::horizontal);
 			}
+			detail::CellKind mirrorHorizontal() const {
+				if (kind == detail::CellKind::leftTop)
+					return detail::CellKind::leftBottom;
+				if (kind == detail::CellKind::rightTop)
+					return detail::CellKind::rightBottom;
+				if (kind == detail::CellKind::leftBottom)
+					return detail::CellKind::leftTop;
+				if (kind == detail::CellKind::rightBottom)
+					return detail::CellKind::rightTop;
+				return kind;
+			}
 			detail::CellKind mirrorVertical() const {
 				if (kind == detail::CellKind::leftTop)
 					return detail::CellKind::rightTop;
@@ -592,7 +603,22 @@ namespace ascg {
 			}
 		};
 
+		inline void PrintGrid(const std::vector<detail::Row>& grid) {
+			str::PrintLn();
+			std::vector<detail::Layer> layers(grid.size());
+			for (const std::string& line : detail::_Renderer{ layers, grid }.draw().rows)
+				str::PrintLn('[', line, ']');
+		}
+
 		class GridBuilder {
+		private:
+			enum class ShiftResult : uint8_t {
+				none,
+				left,
+				right,
+				straight
+			};
+
 		private:
 			const std::vector<detail::Layer>& pLayers;
 			mutable std::vector<detail::Row> pGrid;
@@ -1130,17 +1156,26 @@ namespace ascg {
 			}
 
 		private:
-			int8_t fShiftCheckPreference(size_t y, size_t x, size_t end) const {
-				/* check if the transition actually exists */
-				if (y == end || pGrid[y = detail::Towards(y, end)][x].kind == detail::CellKind::empty)
-					return 0;
+			ShiftResult fShiftCheckPreference(size_t y, size_t x, bool forwards) const {
+				size_t last = (forwards ? pGrid.size() - 1 : 0);
 
-				/* follow the strand until the first shift to the left or right is encountered */
-				while (pGrid[y][x].lineVertical())
-					y = detail::Towards(y, end);
+				/* check if the transition actually exists and points towards the node */
+				if (y == last)
+					return ShiftResult::none;
+				y = detail::Towards(y, last);
+				if (forwards ? !pGrid[y][x].anyTop() : !pGrid[y][x].anyBottom())
+					return ShiftResult::none;
+
+				/* follow the strand until the first shift to the left or right
+				*	is encountered or until the next node has been passed */
+				while (pGrid[y][x].lineVertical()) {
+					if (std::ranges::any_of(pGrid[y], [](auto v) { return v == detail::CellKind::node; }, &detail::Cell::kind))
+						return ShiftResult::straight;
+					y = detail::Towards(y, last);
+				}
 				if (pGrid[y][x].cornerLeft())
-					return -1;
-				return (pGrid[y][x].cornerRight() ? 1 : 0);
+					return ShiftResult::left;
+				return (pGrid[y][x].cornerRight() ? ShiftResult::right : ShiftResult::straight);
 			}
 			bool fShiftNodes() const {
 				/* find the next node and check if it should be shifted (iterate until one has been found or all have been checked;
@@ -1153,18 +1188,26 @@ namespace ascg {
 					if (first >= row.size())
 						continue;
 
-					/* count the preferences of all transitions going out of the node and check if there is a bias */
-					size_t leftShift = 0, rightShift = 0, last = 0;
-					for (size_t i = first; row[i].kind == detail::CellKind::node; ++i) {
+					/* count the preferences of all transitions going out of the node (until the next node has been reached) */
+					size_t leftShift = 0, rightShift = 0, straight = 0, last = 0;
+					for (size_t i = first; (i < row.size() && row[i].kind == detail::CellKind::node); ++i) {
 						last = i;
-						if (int8_t shift = fShiftCheckPreference(y, i, 0); shift != 0)
-							++(shift < 0 ? leftShift : rightShift);
-						if (int8_t shift = fShiftCheckPreference(y, i, pGrid.size() - 1); shift != 0)
-							++(shift < 0 ? leftShift : rightShift);
+						if (ShiftResult shift = fShiftCheckPreference(y, i, false); shift != ShiftResult::none)
+							++(shift == ShiftResult::straight ? straight : (shift == ShiftResult::left ? leftShift : rightShift));
+						if (ShiftResult shift = fShiftCheckPreference(y, i, true); shift != ShiftResult::none)
+							++(shift == ShiftResult::straight ? straight : (shift == ShiftResult::left ? leftShift : rightShift));
 					}
-					if (leftShift == rightShift)
+
+					/* check if there is a potential beenfit in shifting the node */
+					if (leftShift < 1 + rightShift + straight && rightShift < 1 + leftShift + straight)
 						continue;
-					bool leftwards = (leftShift > rightShift);
+
+					/* check if the neighboring slot is free to be used */
+					bool leftwards = (leftShift >= 1 + rightShift + straight);
+					if (leftwards && first > 0 && row[first - 1].kind != detail::CellKind::empty)
+						continue;
+					else if (!leftwards && last + 1 < row.size() && row[last + 1].kind != detail::CellKind::empty)
+						continue;
 
 					/* check if the entire grid needs to be widened to accomodate the new shifting of the node */
 					auto shiftIntoRange = std::ranges::subrange(row.begin() + (leftwards ? 0 : last + 1), (leftwards ? row.begin() + first : row.end()));
@@ -1296,12 +1339,6 @@ namespace ascg {
 			std::vector<detail::Row> build() const {
 				fConstructGrid();
 
-				const auto printGrid = [this]() -> void {
-					std::vector<detail::Layer> layers(pGrid.size());
-					for (const std::string& line : detail::_Renderer{ layers, pGrid }.draw().rows)
-						str::PrintLn('[', line, ']');
-				};
-
 				for (size_t i = 0;; ++i) {
 					while (fStraightenGraph());
 					fShrinkVertical();
@@ -1309,14 +1346,17 @@ namespace ascg {
 					if (i >= 40)
 						break;
 
-					printGrid();
+					detail::PrintGrid(pGrid);
+
+					//if (fRotateCrossings())
+					//	continue;
 
 					/* shifting nodes requires intermediate rows between any two neighboring nodes */
 					if (!fShiftNodes())
 						break;
 				}
 
-				printGrid();
+				detail::PrintGrid(pGrid);
 
 
 				std::vector<detail::Row> grid;
