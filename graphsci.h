@@ -987,200 +987,9 @@ namespace ascg {
 				}
 				return count;
 			}
-			bool fStraightenNodeBend(size_t x, size_t y, size_t xCorner, size_t yCorner) const {
-				size_t target = xCorner;
+			bool fStraightenBlockedIndentRectangle(size_t x, size_t y, size_t xCorner, size_t yCorner, size_t blocker) const {
 
-				/* count the number of empty spots by which the final line can be moved */
-				while (target != x) {
-					size_t next = detail::Towards(target, x);
-					bool blocked = false;
-
-					/* check if the entire strand is still part of the node and is free to be used */
-					if (pGrid[yCorner][next].kind != detail::CellKind::node)
-						break;
-					for (size_t i : detail::MinMaxWalk{ y, yCorner, true }) {
-						if ((blocked = !pGrid[i][next].freeVertical()))
-							break;
-					}
-
-					/* check if the entire range is free and usable and update the index */
-					if (blocked)
-						break;
-					target = next;
-				}
-
-				/* check if no actual suitable movement was found */
-				if (target == xCorner)
-					return false;
-
-				/* count the current number of crossings and upcoming number of
-				*	crossings to ensure the transformation does not induce more */
-				size_t current = fCountPathCrossings(target, y, xCorner, true, false)
-					+ fCountPathCrossings(xCorner, yCorner, y, false, false);
-				size_t future = fCountPathCrossings(target, y, yCorner, false, true);
-				if (current < future)
-					return false;
-
-				/* erase the old horizontal and vertical lines and insert the new one */
-				for (size_t i : detail::MinMaxWalk{ target, xCorner, true })
-					pGrid[y][i].kind = pGrid[y][i].removeHorizontal();
-				for (size_t i : detail::MinMaxWalk{ y, yCorner, true }) {
-					pGrid[i][xCorner].kind = pGrid[i][xCorner].removeVertical();
-					pGrid[i][target].kind = pGrid[i][target].addVertical();
-				}
-
-				/* move the new corner over */
-				pGrid[y][target].kind = (target == x ? detail::CellKind::vertical : pGrid[y][xCorner].kind);
-				pGrid[y][xCorner].kind = detail::CellKind::empty;
-				return true;
-			}
-			bool fStraightenCornerRectangle(size_t x, size_t y, size_t xCorner, size_t yCorner) const {
-				/* ensure that the new corner is free */
-				if (pGrid[yCorner][x].kind != detail::CellKind::empty)
-					return false;
-
-				/* check if the extension of the horizontal axis at the crossing to the new corner is free */
-				for (size_t i : detail::MinMaxWalk{ x, xCorner, true }) {
-					if (!pGrid[yCorner][i].freeHorizontal())
-						return false;
-				}
-
-				/* check if the extension of the original axis can freely get next to the corner */
-				for (size_t i : detail::MinMaxWalk{ y, yCorner, true }) {
-					if (!pGrid[i][x].freeVertical())
-						return false;
-				}
-
-				/* count the current number of crossings and upcoming number of
-				*	crossings to ensure the transformation does not induce more */
-				size_t current = fCountPathCrossings(x, y, xCorner, true, false)
-					+ fCountPathCrossings(xCorner, yCorner, y, false, false);
-				size_t future = fCountPathCrossings(x, y, yCorner, false, true)
-					+ fCountPathCrossings(xCorner, yCorner, x, true, true);
-				if (current < future)
-					return false;
-
-				/* erase the old horizontal and vertical lines and insert the new ones */
-				for (size_t i : detail::MinMaxWalk{ x, xCorner, true }) {
-					pGrid[y][i].kind = pGrid[y][i].removeHorizontal();
-					pGrid[yCorner][i].kind = pGrid[yCorner][i].addHorizontal();
-				}
-				for (size_t i : detail::MinMaxWalk{ y, yCorner, true }) {
-					pGrid[i][xCorner].kind = pGrid[i][xCorner].removeVertical();
-					pGrid[i][x].kind = pGrid[i][x].addVertical();
-				}
-
-				/* move the new corner over and patch the old corners */
-				pGrid[yCorner][x] = pGrid[y][x];
-				pGrid[y][x].kind = detail::CellKind::vertical;
-				pGrid[yCorner][xCorner].kind = detail::CellKind::horizontal;
-				pGrid[y][xCorner].kind = detail::CellKind::empty;
-				return true;
-			}
-			bool fStraightenNormalIndentRectangle(size_t x, size_t y, size_t xCorner, size_t yCorner, size_t target) const {
-				/* count the current number of crossings and upcoming number of
-				*	crossings to ensure the transformation does not induce more */
-				size_t current = fCountPathCrossings(target, y, xCorner, true, false)
-					+ fCountPathCrossings(target, yCorner, xCorner, true, false)
-					+ fCountPathCrossings(xCorner, y, yCorner, false, false);
-				size_t future = fCountPathCrossings(target, y, yCorner, false, true);
-				if (current < future)
-					return false;
-
-				/* erase the old horizontal and vertical lines and insert the new ones */
-				for (size_t i : detail::MinMaxWalk{ target, xCorner, true }) {
-					pGrid[y][i].kind = pGrid[y][i].removeHorizontal();
-					pGrid[yCorner][i].kind = pGrid[yCorner][i].removeHorizontal();
-				}
-				for (size_t i : detail::MinMaxWalk{ y, yCorner, true }) {
-					pGrid[i][target].kind = pGrid[i][target].addVertical();
-					pGrid[i][xCorner].kind = pGrid[i][xCorner].removeVertical();
-				}
-
-				/* move the corners over */
-				pGrid[y][target].kind = (target == x ? detail::CellKind::vertical : pGrid[y][xCorner].kind);
-				pGrid[yCorner][target].kind = (pGrid[yCorner][target].kind != detail::CellKind::horizontal ? detail::CellKind::vertical : pGrid[yCorner][xCorner].kind);
-				pGrid[y][xCorner].kind = detail::CellKind::empty;
-				pGrid[yCorner][xCorner].kind = detail::CellKind::empty;
-				return true;
-			}
-			bool fStraightenExtendedIndentRectangle(size_t x, size_t y, size_t xCorner, size_t yCorner, size_t target) const {
-				/* count the current number of crossings and upcoming number of
-				*	crossings to ensure the transformation does not induce more */
-				size_t current = fCountPathCrossings(xCorner, y, target, true, false)
-					+ fCountPathCrossings(xCorner, y, yCorner, false, false)
-					+ fCountPathCrossings(xCorner, yCorner, target, true, false);
-				size_t future = fCountPathCrossings(x, y, target, true, true)
-					+ fCountPathCrossings(target, y, yCorner, false, true);
-				if (current < future)
-					return false;
-
-				/* erase the old horizontal and vertical lines and insert the new ones */
-				detail::Cell baseCell = pGrid[y][x];
-				for (size_t i : detail::MinMaxWalk{ target, xCorner, true }) {
-					if (detail::Inbetween(i, xCorner, x))
-						pGrid[y][i].kind = pGrid[y][i].removeHorizontal();
-					else
-						pGrid[y][i].kind = pGrid[y][i].addHorizontal();
-					pGrid[yCorner][i].kind = pGrid[yCorner][i].removeHorizontal();
-				}
-				for (size_t i : detail::MinMaxWalk{ y, yCorner, true }) {
-					pGrid[i][target].kind = pGrid[i][target].addVertical();
-					pGrid[i][xCorner].kind = pGrid[i][xCorner].removeVertical();
-				}
-
-				/* move the corners over */
-				pGrid[y][x].kind = baseCell.mirrorVertical();
-				pGrid[y][target].kind = pGrid[y][xCorner].mirrorVertical();
-				pGrid[yCorner][target].kind = (pGrid[yCorner][target].kind != detail::CellKind::horizontal ? detail::CellKind::vertical : pGrid[yCorner][xCorner].kind);
-				pGrid[y][xCorner].kind = detail::CellKind::empty;
-				pGrid[yCorner][xCorner].kind = detail::CellKind::empty;
-				return true;
-			}
-			bool fStraightenIndentRectangle(size_t x, size_t y, size_t xCorner, size_t yCorner) const {
-				/* given the symmetry of the rectangle, only look at it when moving
-				*	downwards (as each scenario will otherwise be investigated twice) */
-				if (y > yCorner)
-					return false;
-				size_t target = xCorner, limit = (x < xCorner ? 0 : pGrid[x].size());
-
-				/* find the end of the horizontal line back, which is parallel to the line of the initial corner */
-				while (true) {
-					target = detail::Towards(target, limit);
-					if (!pGrid[yCorner][target].lineHorizontal())
-						break;
-				}
-
-				/* check if there is a free line between the two horizontal axes */
-				while (true) {
-					bool free = true;
-					for (size_t i : detail::MinMaxWalk{ y, yCorner, true }) {
-						if (!(free = pGrid[i][target].freeVertical()))
-							break;
-					}
-
-					/* check if this would extend any of the original axes,
-					*	in which case the horizontal also needs to be free */
-					if (free && !detail::Inbetween(target, x, xCorner)) {
-						for (size_t i : detail::MinMaxWalk{ y, yCorner, true }) {
-							if (!(free = pGrid[i][target].freeVertical()))
-								break;
-						}
-					}
-					if (free)
-						break;
-
-					/* move the target one step closer to the crossing and check if the indent still could be reduced */
-					target = detail::Towards(target, xCorner);
-					if (target == xCorner)
-						return false;
-				}
-
-				/* forward the case according to an either reduction of the
-				*	indentation, or over-extension into the other direction */
-				if (detail::Inbetween(target, x, xCorner))
-					return fStraightenNormalIndentRectangle(x, y, xCorner, yCorner, target);
-				return fStraightenExtendedIndentRectangle(x, y, xCorner, yCorner, target);
+				return false;
 			}
 			bool fStraightenGraph() const {
 				/* find the next corner to pursue (iterate until one has been found or all have been checked) */
@@ -1191,20 +1000,99 @@ namespace ascg {
 						if (!cell.anyCorner())
 							continue;
 
-						/* ensure that the range forms the 'z' form and find the other end of the range corner */
-						size_t xCorner = x, yCorner = y;
-						if (cell.cornerLeft()) while (pGrid[yCorner][--xCorner].lineHorizontal());
-						else while (pGrid[yCorner][++xCorner].lineHorizontal());
-						if (cell.cornerTop()) while (pGrid[++yCorner][xCorner].lineVertical());
-						else while (pGrid[--yCorner][xCorner].lineVertical());
+						/* find the other corner of this construct (i.e. after moving horizontal and vertical again, the endpoint) */
+						size_t xOther = x, yOther = y;
+						if (cell.cornerLeft()) while (pGrid[yOther][--xOther].lineHorizontal());
+						else while (pGrid[yOther][++xOther].lineHorizontal());
+						if (cell.cornerTop()) while (pGrid[++yOther][xOther].lineVertical());
+						else while (pGrid[--yOther][xOther].lineVertical());
 
-						/* check if its one of the existing straightening patterns and try to apply it */
-						if (pGrid[yCorner][xCorner].kind == detail::CellKind::node && fStraightenNodeBend(x, y, xCorner, yCorner))
-							return true;
-						else if (pGrid[yCorner][xCorner].kind == cell.kind && fStraightenCornerRectangle(x, y, xCorner, yCorner))
-							return true;
-						else if (pGrid[yCorner][xCorner].kind == cell.mirrorVertical() && fStraightenIndentRectangle(x, y, xCorner, yCorner))
-							return true;
+						/* find the end of the next horizontal axis walking towards the original horizontal position */
+						bool endIsNode = (pGrid[yOther][xOther].kind == detail::CellKind::node);
+						size_t xEnd = xOther;
+						if (endIsNode) for (size_t i = xEnd; pGrid[yOther][i].kind == detail::CellKind::node && xEnd != x; i = detail::Towards(i, x))
+							xEnd = i;
+						else if (pGrid[yOther][xOther].kind != cell.kind) {
+							size_t limit = (xOther < x ? row.size() : 0);
+							while (pGrid[yOther][xEnd = detail::Towards(xEnd, limit)].lineHorizontal());
+
+							/* check if the other side is larger than the current horizontal, in which case the corner [x,y]
+							*	is not the primary corner, and it can be ignored until the primary corner is inspected again */
+							if (!detail::Inbetween(xEnd, x, xOther))
+								continue;
+						}
+
+						/* find the target axis to reduce the indentation by */
+						size_t target = (endIsNode ? xEnd : x);
+						while (target != xOther) {
+							bool valid = true;
+
+							/* check if the other corner is free */
+							if (!endIsNode && !detail::Inbetween(target, xOther, xEnd))
+								valid = (pGrid[yOther][target].kind == detail::CellKind::empty);
+
+							/* check the vertical axis from the primary corner to the height of the other corner */
+							if (valid) for (size_t i : detail::MinMaxWalk{ y, yOther, true }) {
+								if (!(valid = pGrid[i][target].freeVertical()))
+									break;
+							}
+
+							/* incase of the primary corner lying further than the other corner,
+							*	check if the horizontal to the secondary corner is free as well */
+							if (valid && !detail::Inbetween(target, xOther, xEnd)) for (size_t i : detail::MinMaxWalk{ xEnd, target, true }) {
+								if (!(valid = pGrid[yOther][i].freeHorizontal()))
+									break;
+							}
+
+							/* ensure that the future new shortcut would not introduce any new crossings */
+							if (valid) {
+								size_t current = fCountPathCrossings(xOther, y, target, true, false)
+									+ fCountPathCrossings(xOther, y, yOther, false, false);
+								if (!endIsNode)
+									current += fCountPathCrossings(xOther, yOther, (detail::Inbetween(target, xOther, xEnd) ? target : xEnd), true, false);
+								size_t future = fCountPathCrossings(target, y, yOther, false, true);
+								if (!endIsNode && detail::Inbetween(xEnd, xOther, target))
+									future += fCountPathCrossings(target, yOther, xEnd, true, true);
+								valid = (future <= current);
+							}
+
+							/* check if a valid target was found and otherwise move it closer to the other corner and try again */
+							if (valid)
+								break;
+							target = detail::Towards(target, xOther);
+						}
+
+						/* check if the end has been reached without finding a valid alternative
+						*	path, in which case the current indentation cannot be reduced */
+						if (target == xOther)
+							continue;
+
+						/* move the vertical line over */
+						for (size_t i : detail::MinMaxWalk{ y, yOther, true }) {
+							pGrid[i][target].kind = pGrid[i][target].addVertical();
+							pGrid[i][xOther].kind = pGrid[i][xOther].removeVertical();
+						}
+
+						/* remove the primary and update the other horizontal line */
+						for (size_t i : detail::MinMaxWalk{ xOther, target, true }) {
+							pGrid[y][i].kind = pGrid[y][i].removeHorizontal();
+							if (!endIsNode && i != xEnd)
+								pGrid[yOther][i].kind = (detail::Inbetween(i, xOther, xEnd) ? pGrid[yOther][i].removeHorizontal() : pGrid[yOther][i].addHorizontal());
+						}
+
+						/* patch all of the affected corners */
+						if (!endIsNode) {
+							if (detail::Inbetween(target, xOther, xEnd))
+								pGrid[yOther][target].kind = (target == xEnd ? detail::CellKind::vertical : pGrid[y][x].mirrorVertical());
+							else {
+								pGrid[yOther][xEnd].kind = pGrid[yOther][xEnd].mirrorVertical();
+								pGrid[yOther][target].kind = pGrid[y][x].kind;
+							}
+							pGrid[yOther][xOther].kind = (xOther == xEnd ? detail::CellKind::horizontal : detail::CellKind::empty);
+						}
+						pGrid[y][target].kind = (target == x ? detail::CellKind::vertical : pGrid[y][xOther].kind);
+						pGrid[y][xOther].kind = detail::CellKind::empty;
+						return true;
 					}
 				}
 				return false;
