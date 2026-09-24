@@ -26,6 +26,8 @@
 *	shrink horizontally
 *	shrink vertically
 *	straighten up any lines
+*
+*	grid creation: dont account for number of crossings anymore for minimum size?
 */
 
 
@@ -699,6 +701,93 @@ namespace ascg {
 				}
 				return where;
 			}
+			std::pair<size_t, size_t> fCreateEmptyCell(size_t x, size_t y, bool leftwards) const {
+				if (pGrid[y][x].kind == detail::CellKind::empty)
+					return{ x, y };
+
+				/* check if the entire grid needs to be widened to accomodate the shifting of the affected
+				*	cells (to ensure all upcoming operations can perform the shifts without checking bounds) */
+				auto shiftIntoRange = std::ranges::subrange(pGrid[y].begin() + (leftwards ? 0 : x + 1), (leftwards ? pGrid[y].begin() + x : pGrid[y].end()));
+				if (!std::ranges::any_of(shiftIntoRange, [](auto v) { return (v == detail::CellKind::empty); }, &detail::Cell::kind)) {
+					size_t index = (leftwards ? 0 : pGrid[y].size());
+
+					/* increase the grid accordingly and patch the index */
+					for (size_t i = 0; i < pGrid.size(); ++i)
+						pGrid[i].insert(pGrid[i].begin() + index, detail::Cell{});
+					if (leftwards)
+						++x;
+				}
+
+				/* setup the slice to move the previous entries (may invalidate references) */
+				std::vector<size_t> slice(pGrid[y].size(), detail::SlotUnused);
+				if (y > 0) {
+					detail::Row& prev = pGrid[y - 1];
+					detail::Row& cur = pGrid[y];
+
+					/* setup the initial identity mapping (look at both neighbors to track transitions coming out of nodes) */
+					for (size_t i = 0; i < cur.size(); ++i)
+						slice[i] = ((prev[i].anyBottom() || cur[i].anyTop()) ? i : detail::SlotUnused);
+
+					/* iterate again and apply the shift to the slice such that they all target their new shifted position */
+					if (leftwards) for (size_t i = x + 1; i > 0; --i) {
+						if (slice[i - 1] != detail::SlotUnused)
+							--slice[i - 1];
+						else if (i <= x && cur[i - 1].kind == detail::CellKind::empty)
+							break;
+					}
+					else for (size_t i = x; i < cur.size(); ++i) {
+						if (slice[i] != detail::SlotUnused)
+							++slice[i];
+						else if (i > x && cur[i].kind == detail::CellKind::empty)
+							break;
+					}
+
+					/* insert the shifting */
+					y = fInsertSliceCorrections(slice, y);
+				}
+
+				/* setup the slice to move the next entries (may invalidate references) */
+				if (y + 1 < pGrid.size()) {
+					detail::Row& cur = pGrid[y];
+					detail::Row& next = pGrid[y + 1];
+
+					/* setup the initial identity mapping (look at both neighbors to track transitions coming out of nodes) */
+					for (size_t i = 0; i < cur.size(); ++i)
+						slice[i] = ((cur[i].anyBottom() || next[i].anyTop()) ? i : detail::SlotUnused);
+
+					/* iterate again and apply the shift to the slice such that they each start at their new shifted position */
+					size_t current = detail::SlotUnused;
+					if (leftwards) for (size_t i = x + 1; i > 0; --i) {
+						std::swap(current, slice[i - 1]);
+						if (current == detail::SlotUnused && i <= x && cur[i - 1].kind == detail::CellKind::empty)
+							break;
+					}
+					else for (size_t i = x; i < cur.size(); ++i) {
+						std::swap(current, slice[i]);
+						if (current == detail::SlotUnused && i > x && cur[i].kind == detail::CellKind::empty)
+							break;
+					}
+
+					/* insert the shifting */
+					fInsertSliceCorrections(slice, y + 1);
+				}
+
+				/* shift the original row itself into position (after the previous and
+				*	upcoming rows in order to ensure the slices can be constructed properly) */
+				detail::Row& row = pGrid[y];
+				detail::Cell temp{};
+				if (leftwards) for (size_t i = x + 1; i > 0; --i) {
+					std::swap(temp, row[i - 1]);
+					if (temp.kind == detail::CellKind::empty)
+						break;
+				}
+				else for (size_t i = x; i < row.size(); ++i) {
+					std::swap(temp, row[i]);
+					if (temp.kind == detail::CellKind::empty)
+						break;
+				}
+				return{ x, y };
+			}
 
 		private:
 			std::map<size_t, size_t> fSetupNodeMap(size_t index, size_t width) const {
@@ -1152,85 +1241,8 @@ namespace ascg {
 					else if (!leftwards && last + 1 < row.size() && row[last + 1].kind != detail::CellKind::empty)
 						continue;
 
-					/* check if the entire grid needs to be widened to accomodate the new shifting of the node */
-					auto shiftIntoRange = std::ranges::subrange(row.begin() + (leftwards ? 0 : last + 1), (leftwards ? row.begin() + first : row.end()));
-					if (!std::ranges::any_of(shiftIntoRange, [](auto v) { return (v == detail::CellKind::empty); }, &detail::Cell::kind)) {
-						size_t index = (leftwards ? 0 : row.size());
-
-						/* increase the grid accordingly and patch the indices */
-						for (size_t i = 0; i < pGrid.size(); ++i)
-							pGrid[i].insert(pGrid[i].begin() + index, detail::Cell{});
-						if (leftwards)
-							++first, ++last;
-					}
-
-					/* shift the original row itself into position (must be able to place all, as an
-					*	empty new cell would already have been inserted, should it not have matched) */
-					detail::Cell temp{};
-					if (leftwards) for (size_t i = last + 1; i > 0; --i) {
-						std::swap(temp, row[i - 1]);
-						if (temp.kind == detail::CellKind::empty)
-							break;
-					}
-					else for (size_t i = first; i < row.size(); ++i) {
-						std::swap(temp, row[i]);
-						if (temp.kind == detail::CellKind::empty)
-							break;
-					}
-
-					/* setup the slice to move the previous entries (may invalidate the row reference) */
-					std::vector<size_t> slice(row.size(), detail::SlotUnused);
-					if (y > 0) {
-						detail::Row& prev = pGrid[y - 1];
-
-						/* setup the initial identity mapping */
-						for (size_t i = 0; i < prev.size(); ++i)
-							slice[i] = (prev[i].anyBottom() ? i : detail::SlotUnused);
-
-						/* iterate again and apply the shift to the slice such that they all target their new
-						*	shifted position (must be shiftable, as an empty node would otherwise have been inserted) */
-						if (leftwards) for (size_t i = last + 1; i > 0; --i) {
-							if (slice[i - 1] != detail::SlotUnused)
-								--slice[i - 1];
-							else if (i <= first)
-								break;
-						}
-						else for (size_t i = first; i < prev.size(); ++i) {
-							if (slice[i] != detail::SlotUnused)
-								++slice[i];
-							else if (i > last)
-								break;
-						}
-
-						/* insert the shifting */
-						y = fInsertSliceCorrections(slice, y);
-					}
-
-					/* setup the slice to move the next entries (may invalidate the row reference) */
-					if (y + 1 < pGrid.size()) {
-						detail::Row& next = pGrid[y + 1];
-
-						/* setup the initial identity mapping */
-						for (size_t i = 0; i < next.size(); ++i)
-							slice[i] = (next[i].anyTop() ? i : detail::SlotUnused);
-
-						/* iterate again and apply the shift to the slice such that they each start at their new
-						*	shifted position (must be shiftable, as an empty node would otherwise have been inserted) */
-						size_t current = detail::SlotUnused;
-						if (leftwards) for (size_t i = last + 1; i > 0; --i) {
-							std::swap(current, slice[i - 1]);
-							if (current == detail::SlotUnused && i <= first)
-								break;
-						}
-						else for (size_t i = first; i < next.size(); ++i) {
-							std::swap(current, slice[i]);
-							if (current == detail::SlotUnused && i > last)
-								break;
-						}
-
-						/* insert the shifting */
-						fInsertSliceCorrections(slice, y + 1);
-					}
+					/* move the node over by ensuring that the spot next to it becomes empty */
+					fCreateEmptyCell((leftwards ? last : first), y, leftwards);
 					return true;
 				}
 				return false;
