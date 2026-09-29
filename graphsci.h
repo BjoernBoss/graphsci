@@ -1310,73 +1310,6 @@ namespace ascg {
 			}
 
 		private:
-			bool fRotateCrossings() const {
-				/* iterate over the grid and look for single crossings, and
-				*	check if they should be rotated to reduce the corner count */
-				for (size_t y = 0; y < pGrid.size(); ++y) {
-					detail::Row& row = pGrid[y];
-					for (size_t x = 0; x < row.size(); ++x) {
-						if (row[x].kind != detail::CellKind::crossing)
-							continue;
-
-						/* find the edges of the paths to the crossing and ensure that its not a multi-crossing
-						*	(i.e. the horizontal only crosses a single axis before turning vertical again) */
-						size_t left = x, right = x, prev = y, next = y;
-						while (row[++right].kind == detail::CellKind::horizontal);
-						while (row[--left].kind == detail::CellKind::horizontal);
-						if (row[left].kind == detail::CellKind::crossing || row[right].kind == detail::CellKind::crossing) {
-							x = right;
-							continue;
-						}
-						while (pGrid[--prev][x].lineVertical());
-						while (pGrid[++next][x].lineVertical());
-
-						/* determine the orientation of all next corners */
-						int8_t leftDir = 0, rightDir = 0, prevDir = 0, nextDir = 0;
-						leftDir = (row[left].kind == detail::CellKind::rightTop ? 1 : -1);
-						rightDir = (row[right].kind == detail::CellKind::leftBottom ? 1 : -1);
-						if (detail::CellKind kind = pGrid[prev][x].kind; kind != detail::CellKind::node)
-							prevDir = (kind == detail::CellKind::rightBottom ? 1 : -1);
-						if (detail::CellKind kind = pGrid[next][x].kind; kind != detail::CellKind::node)
-							nextDir = (kind == detail::CellKind::leftTop ? 1 : -1);
-						int8_t totalSpin = (leftDir + rightDir + prevDir + nextDir);
-
-						/* check if there is a clear bias to fix a skewed rotation */
-						if ((totalSpin > -3 && totalSpin < 3) || prevDir != nextDir) {
-							x = right;
-							continue;
-						}
-						bool clockwise = (totalSpin > 0);
-
-						detail::PrintGrid(pGrid);
-
-						std::vector<size_t> slice(row.size(), detail::SlotUnused);
-
-						/* setup the slice to switch the upper layer around */
-						for (size_t i = 0; i < slice.size(); ++i)
-							slice[i] = ((pGrid[y][i].anyTop() || pGrid[y - 1][i].anyBottom()) ? i : detail::SlotUnused);
-						slice[left] = (clockwise ? x : detail::SlotUnused);
-						slice[x] = (clockwise ? right : left);
-						slice[right] = (clockwise ? detail::SlotUnused : x);
-						y = fInsertSliceCorrections(slice, y);
-
-						pGrid[y][left].kind = pGrid[y][left].mirrorHorizontal();
-						pGrid[y][right].kind = pGrid[y][right].mirrorHorizontal();
-
-						for (size_t i = 0; i < slice.size(); ++i)
-							slice[i] = ((pGrid[y][i].anyBottom() || pGrid[y + 1][i].anyTop()) ? i : detail::SlotUnused);
-						slice[left] = (clockwise ? x : detail::SlotUnused);
-						slice[x] = (clockwise ? right : left);
-						slice[right] = (clockwise ? detail::SlotUnused : x);
-						y = fInsertSliceCorrections(slice, y + 1);
-
-						detail::PrintGrid(pGrid);
-						return true;
-					}
-				}
-
-				return false;
-			}
 			ShiftResult fShiftCheckPreference(size_t y, size_t x, bool forwards) const {
 				size_t last = (forwards ? pGrid.size() - 1 : 0);
 
@@ -1506,9 +1439,6 @@ namespace ascg {
 						break;
 
 					detail::PrintGrid(pGrid);
-
-					//if (fRotateCrossings())
-					//	continue;
 
 					/* shifting nodes requires intermediate rows between any two neighboring nodes */
 					if (!fShiftNodes())
