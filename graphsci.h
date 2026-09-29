@@ -1124,101 +1124,78 @@ namespace ascg {
 				}
 				return count;
 			}
-			bool fStraightenInterlockedTransitions(size_t x, size_t y, size_t yOther, bool leftwards) const {
-				/* look for a corner of the blocker and ensure there is no node inbetween */
-				size_t yCorner = detail::Towards(y, yOther);
-				while (yCorner != yOther && !pGrid[yCorner][x].anyCorner()) {
-					if (pGrid[yCorner][x].kind == detail::CellKind::node)
+			bool fMapIndentCorner(size_t x, size_t y, size_t& xOther, size_t& yOther, size_t& xEnd, size_t& target) const {
+				const detail::Cell& cell = pGrid[y][x];
+
+				/* find the other corner of this construct (i.e. after moving horizontal and vertical again, the endpoint) */
+				if (cell.cornerLeft()) while (pGrid[yOther][--xOther].lineHorizontal());
+				else while (pGrid[yOther][++xOther].lineHorizontal());
+				if (cell.cornerTop()) while (pGrid[++yOther][xOther].lineVertical());
+				else while (pGrid[--yOther][xOther].lineVertical());
+
+				/* find the end of the next horizontal axis walking towards the original horizontal position */
+				bool endIsNode = (pGrid[yOther][xOther].kind == detail::CellKind::node);
+				xEnd = xOther;
+				if (endIsNode) for (size_t i = xEnd; pGrid[yOther][i].kind == detail::CellKind::node && xEnd != x; i = detail::Towards(i, x))
+					xEnd = i;
+				else if (pGrid[yOther][xOther].kind != cell.kind) {
+					size_t limit = (xOther < x ? pGrid[y].size() : 0);
+					while (pGrid[yOther][xEnd = detail::Towards(xEnd, limit)].lineHorizontal());
+
+					/* check if the other side is larger than the current horizontal, in which case the corner [x,y]
+					*	is not the primary corner, and it can be ignored until the primary corner is inspected again */
+					if (!detail::Inbetween(xEnd, x, xOther))
 						return false;
-					yCorner = detail::Towards(yCorner, yOther);
 				}
 
-				/* check if no corner has been found, which can only be the case
-				*	if the blocker spans the entire range of the original transition */
-				if (yCorner == yOther) {
-					size_t xBase = (leftwards ? x + 1 : x - 1);
+				/* check if the end of the node has already been reached, in which case nothing can be done anymore */
+				if (endIsNode && xEnd == xOther)
+					return false;
 
-					/* check if both end in the same node, in which case they can be swapped */
-					if (pGrid[yOther][x].kind == detail::CellKind::node && pGrid[yOther][xBase].kind == detail::CellKind::node) {
-						size_t yMove = (yOther > y ? y++ : y + 1);
-						fInsertBlankRow(yMove);
+				/* find the target axis to reduce the indentation by */
+				target = (endIsNode ? xEnd : x);
+				while (target != xOther) {
+					bool valid = true;
 
-						/* move the original corner down to let the blocking transition be used the the original transition */
-						pGrid[y][x].kind = pGrid[y][xBase].kind;
+					/* check if the other corner is free */
+					if (!endIsNode && !detail::Inbetween(target, xOther, xEnd))
+						valid = (pGrid[yOther][target].kind == detail::CellKind::empty);
 
-						/* patch the original transition path to move into the original blocker */
-						pGrid[yMove][xBase].kind = pGrid[y][xBase].kind;
-						pGrid[y][xBase].kind = detail::CellKind::vertical;
-						pGrid[yMove][x].kind = pGrid[y][x].mirrorFull();
-						return true;
+					/* check the vertical axis from the primary corner to the height of the other corner */
+					if (valid) for (size_t i : detail::MinMaxWalk{ y, yOther, true }) {
+						if (!(valid = pGrid[i][target].freeVertical()))
+							break;
 					}
 
-					/* check if the blocked transition crosses the blocking transition again as nothing can otherwise be done */
-					if (pGrid[yOther][x].kind != detail::CellKind::crossing)
-						return false;
+					/* incase of the primary corner lying further than the other corner,
+					*	check if the horizontal to the secondary corner is free as well */
+					if (valid && !detail::Inbetween(target, xOther, xEnd)) for (size_t i : detail::MinMaxWalk{ xEnd, target, true }) {
+						if (!(valid = pGrid[yOther][i].freeHorizontal()))
+							break;
+					}
 
-					/* insert detours at the two ends (detour the blocking transition; first the higher
-					*	positions, as the detour inserts new rows and may otherwise skew the other y position) */
-					if (yOther < y) {
-						xBase = fCreateCornerDetour(xBase, y, !leftwards).first;
-						fCreateCornerDetour(xBase, yOther, !leftwards);
+					/* ensure that the future new shortcut would not introduce any new crossings */
+					if (valid) {
+						size_t current = fCountPathCrossings(xOther, y, target, true, false)
+							+ fCountPathCrossings(xOther, y, yOther, false, false);
+						if (!endIsNode) {
+							size_t end = (detail::Inbetween(target, xOther, xEnd) ? target : xEnd);
+							current += fCountPathCrossings(xOther, yOther, end, true, false);
+						}
+						size_t future = fCountPathCrossings(target, y, yOther, false, true);
+						if (!endIsNode && detail::Inbetween(xEnd, xOther, target))
+							future += fCountPathCrossings(target, yOther, xEnd, true, true);
+						valid = (future <= current);
 					}
-					else {
-						xBase = fCreateCornerDetour(xBase, yOther, !leftwards).first;
-						fCreateCornerDetour(xBase, y, !leftwards);
-					}
-					return true;
+
+					/* check if a valid target was found and otherwise move it closer to the other corner and try again */
+					if (valid)
+						break;
+					target = detail::Towards(target, xOther);
 				}
-
-				/* ensure that the preferred direction points away from the grids center,
-				*	otherwise, the other side of this interlocking will handle it */
-				size_t lineWidth = pGrid[yCorner].size();
-				while (pGrid[yCorner][lineWidth - 1].kind == detail::CellKind::empty)
-					--lineWidth;
-				for (size_t i = 0; pGrid[yCorner][i].kind == detail::CellKind::empty; ++i)
-					--lineWidth;
-				if (leftwards ? (x * 2 > lineWidth) : (x * 2 < lineWidth))
-					return false;
-
-				/* check if the corner points into the opposite direction the locked
-				*	corner wants to move, in which case they are blocking each other */
-				if (leftwards ? !pGrid[yCorner][x].cornerRight() : !pGrid[yCorner][x].cornerLeft())
-					return false;
-
-				/* insert the detour for the original transition to pass on the other side of the blocking corner */
-				fCreateCornerDetour(x, yCorner, leftwards);
 				return true;
 			}
-			void fStraightenNormalTransition(size_t x, size_t y, size_t xOther, size_t yOther, size_t xEnd, size_t target) const {
-				bool endIsNode = (pGrid[yOther][xOther].kind == detail::CellKind::node);
-
-				/* move the vertical line over */
-				for (size_t i : detail::MinMaxWalk{ y, yOther, true }) {
-					pGrid[i][target].kind = pGrid[i][target].addVertical();
-					pGrid[i][xOther].kind = pGrid[i][xOther].removeVertical();
-				}
-
-				/* remove the primary and update the other horizontal line */
-				for (size_t i : detail::MinMaxWalk{ xOther, target, true }) {
-					pGrid[y][i].kind = pGrid[y][i].removeHorizontal();
-					if (!endIsNode && i != xEnd)
-						pGrid[yOther][i].kind = (detail::Inbetween(i, xOther, xEnd) ? pGrid[yOther][i].removeHorizontal() : pGrid[yOther][i].addHorizontal());
-				}
-
-				/* patch all of the affected corners */
-				if (!endIsNode) {
-					if (detail::Inbetween(target, xOther, xEnd))
-						pGrid[yOther][target].kind = (target == xEnd ? detail::CellKind::vertical : pGrid[y][x].mirrorVertical());
-					else {
-						pGrid[yOther][xEnd].kind = pGrid[yOther][xEnd].mirrorVertical();
-						pGrid[yOther][target].kind = pGrid[y][x].kind;
-					}
-					pGrid[yOther][xOther].kind = (xOther == xEnd ? detail::CellKind::horizontal : detail::CellKind::empty);
-				}
-				pGrid[y][target].kind = (target == x ? detail::CellKind::vertical : pGrid[y][xOther].kind);
-				pGrid[y][xOther].kind = detail::CellKind::empty;
-			}
-			bool fStraightenGraph(bool interlocks) const {
+			bool fStraightenGraph() const {
 				/* find the next corner to pursue (iterate until one has been found or all have been checked) */
 				for (size_t y = 0; y < pGrid.size(); ++y) {
 					detail::Row& row = pGrid[y];
@@ -1227,82 +1204,119 @@ namespace ascg {
 						if (!cell.anyCorner())
 							continue;
 
-						/* find the other corner of this construct (i.e. after moving horizontal and vertical again, the endpoint) */
-						size_t xOther = x, yOther = y;
-						if (cell.cornerLeft()) while (pGrid[yOther][--xOther].lineHorizontal());
-						else while (pGrid[yOther][++xOther].lineHorizontal());
-						if (cell.cornerTop()) while (pGrid[++yOther][xOther].lineVertical());
-						else while (pGrid[--yOther][xOther].lineVertical());
-
-						/* find the end of the next horizontal axis walking towards the original horizontal position */
+						/* resolve the indentation and check if a reduction path can be found and apply it */
+						size_t xOther = x, yOther = y, xEnd = 0, target = 0;
+						if (!fMapIndentCorner(x, y, xOther, yOther, xEnd, target) || target == xOther)
+							continue;
 						bool endIsNode = (pGrid[yOther][xOther].kind == detail::CellKind::node);
-						size_t xEnd = xOther;
-						if (endIsNode) for (size_t i = xEnd; pGrid[yOther][i].kind == detail::CellKind::node && xEnd != x; i = detail::Towards(i, x))
-							xEnd = i;
-						else if (pGrid[yOther][xOther].kind != cell.kind) {
-							size_t limit = (xOther < x ? row.size() : 0);
-							while (pGrid[yOther][xEnd = detail::Towards(xEnd, limit)].lineHorizontal());
 
-							/* check if the other side is larger than the current horizontal, in which case the corner [x,y]
-							*	is not the primary corner, and it can be ignored until the primary corner is inspected again */
-							if (!detail::Inbetween(xEnd, x, xOther))
-								continue;
+						/* move the vertical line over */
+						for (size_t i : detail::MinMaxWalk{ y, yOther, true }) {
+							pGrid[i][target].kind = pGrid[i][target].addVertical();
+							pGrid[i][xOther].kind = pGrid[i][xOther].removeVertical();
 						}
 
-						/* check if the end of the node has already been reached, in which case nothing can be done anymore */
-						if (endIsNode && xEnd == xOther)
+						/* remove the primary and update the other horizontal line */
+						for (size_t i : detail::MinMaxWalk{ xOther, target, true }) {
+							pGrid[y][i].kind = pGrid[y][i].removeHorizontal();
+							if (!endIsNode && i != xEnd)
+								pGrid[yOther][i].kind = (detail::Inbetween(i, xOther, xEnd) ? pGrid[yOther][i].removeHorizontal() : pGrid[yOther][i].addHorizontal());
+						}
+
+						/* patch all of the affected corners */
+						if (!endIsNode) {
+							if (detail::Inbetween(target, xOther, xEnd))
+								pGrid[yOther][target].kind = (target == xEnd ? detail::CellKind::vertical : pGrid[y][x].mirrorVertical());
+							else {
+								pGrid[yOther][xEnd].kind = pGrid[yOther][xEnd].mirrorVertical();
+								pGrid[yOther][target].kind = pGrid[y][x].kind;
+							}
+							pGrid[yOther][xOther].kind = (xOther == xEnd ? detail::CellKind::horizontal : detail::CellKind::empty);
+						}
+						pGrid[y][target].kind = (target == x ? detail::CellKind::vertical : pGrid[y][xOther].kind);
+						pGrid[y][xOther].kind = detail::CellKind::empty;
+						return true;
+					}
+				}
+				return false;
+			}
+			bool fFixInterlocks() const {
+				/* find the next corner to pursue (iterate until one has been found or all have been checked) */
+				for (size_t y = 0; y < pGrid.size(); ++y) {
+					detail::Row& row = pGrid[y];
+					for (size_t x = 0; x < row.size(); ++x) {
+						detail::Cell& cell = row[x];
+						if (!cell.anyCorner())
 							continue;
 
-						/* find the target axis to reduce the indentation by */
-						size_t target = (endIsNode ? xEnd : x);
-						while (target != xOther) {
-							bool valid = true;
+						/* resolve the indentation and check if the current indentation is blocked by
+						*	another indentation into the opposite direction and try to resolve them */
+						size_t xOther = x, yOther = y, xEnd = 0, target = 0;
+						if (!fMapIndentCorner(x, y, xOther, yOther, xEnd, target) || target != xOther)
+							continue;
+						bool endIsNode = (pGrid[yOther][xOther].kind == detail::CellKind::node);
+						bool leftwards = (x < xOther);
 
-							/* check if the other corner is free */
-							if (!endIsNode && !detail::Inbetween(target, xOther, xEnd))
-								valid = (pGrid[yOther][target].kind == detail::CellKind::empty);
-
-							/* check the vertical axis from the primary corner to the height of the other corner */
-							if (valid) for (size_t i : detail::MinMaxWalk{ y, yOther, true }) {
-								if (!(valid = pGrid[i][target].freeVertical()))
-									break;
-							}
-
-							/* incase of the primary corner lying further than the other corner,
-							*	check if the horizontal to the secondary corner is free as well */
-							if (valid && !detail::Inbetween(target, xOther, xEnd)) for (size_t i : detail::MinMaxWalk{ xEnd, target, true }) {
-								if (!(valid = pGrid[yOther][i].freeHorizontal()))
-									break;
-							}
-
-							/* ensure that the future new shortcut would not introduce any new crossings */
-							if (valid) {
-								size_t current = fCountPathCrossings(xOther, y, target, true, false)
-									+ fCountPathCrossings(xOther, y, yOther, false, false);
-								if (!endIsNode)
-									current += fCountPathCrossings(xOther, yOther, (detail::Inbetween(target, xOther, xEnd) ? target : xEnd), true, false);
-								size_t future = fCountPathCrossings(target, y, yOther, false, true);
-								if (!endIsNode && detail::Inbetween(xEnd, xOther, target))
-									future += fCountPathCrossings(target, yOther, xEnd, true, true);
-								valid = (future <= current);
-							}
-
-							/* check if a valid target was found and otherwise move it closer to the other corner and try again */
-							if (valid)
-								break;
-							target = detail::Towards(target, xOther);
+						/* look for a corner of the blocker and ensure there is no node inbetween */
+						size_t xCorner = detail::Towards(xOther, x), yCorner = detail::Towards(y, yOther);
+						while (yCorner != yOther && !pGrid[yCorner][xCorner].anyCorner()) {
+							if (pGrid[yCorner][xCorner].kind == detail::CellKind::node)
+								return false;
+							yCorner = detail::Towards(yCorner, yOther);
 						}
 
-						/* check if the end has been reached without finding a valid alternative path, in which case the current
-						*	indentation could be blocked by a neighboring indentation into the other direction, or it cannot be reduced */
-						if (target == xOther) {
-							if (interlocks && fStraightenInterlockedTransitions(detail::Towards(xOther, x), y, yOther, (x < xOther)))
+						/* check if no corner has been found, which can only be the case
+						*	if the blocker spans the entire range of the original transition */
+						if (yCorner == yOther) {
+							/* check if both end in the same node, in which case they can be swapped */
+							if (pGrid[yOther][xCorner].kind == detail::CellKind::node && pGrid[yOther][x].kind == detail::CellKind::node) {
+								size_t yMove = (yOther > y ? y++ : y + 1);
+								fInsertBlankRow(yMove);
+
+								/* move the original corner down to let the blocking transition be used the the original transition */
+								pGrid[y][xCorner].kind = pGrid[y][x].kind;
+
+								/* patch the original transition path to move into the original blocker */
+								pGrid[yMove][x].kind = pGrid[y][x].kind;
+								pGrid[y][x].kind = detail::CellKind::vertical;
+								pGrid[yMove][xCorner].kind = pGrid[y][xCorner].mirrorFull();
 								return true;
-							continue;
+							}
+
+							/* check if the blocked transition crosses the blocking transition again as nothing can otherwise be done */
+							if (pGrid[yOther][xCorner].kind != detail::CellKind::crossing)
+								return false;
+
+							/* insert detours at the two ends (detour the blocking transition; first the higher
+							*	positions, as the detour inserts new rows and may otherwise skew the other y position) */
+							if (yOther < y) {
+								x = fCreateCornerDetour(x, y, !leftwards).first;
+								fCreateCornerDetour(x, yOther, !leftwards);
+							}
+							else {
+								x = fCreateCornerDetour(x, yOther, !leftwards).first;
+								fCreateCornerDetour(x, y, !leftwards);
+							}
+							return true;
 						}
 
-						/* straighten out the transition */
-						fStraightenNormalTransition(x, y, xOther, yOther, xEnd, target);
+						/* ensure that the preferred direction points away from the grids center,
+						*	otherwise, the other side of this interlocking will handle it */
+						size_t lineWidth = pGrid[yCorner].size();
+						while (pGrid[yCorner][lineWidth - 1].kind == detail::CellKind::empty)
+							--lineWidth;
+						for (size_t i = 0; pGrid[yCorner][i].kind == detail::CellKind::empty; ++i)
+							--lineWidth;
+						if (leftwards ? (xCorner * 2 > lineWidth) : (xCorner * 2 < lineWidth))
+							return false;
+
+						/* check if the corner points into the opposite direction the locked
+						*	corner wants to move, in which case they are blocking each other */
+						if (leftwards ? !pGrid[yCorner][xCorner].cornerRight() : !pGrid[yCorner][xCorner].cornerLeft())
+							return false;
+
+						/* insert the detour for the original transition to pass on the other side of the blocking corner */
+						fCreateCornerDetour(xCorner, yCorner, leftwards);
 						return true;
 					}
 				}
@@ -1422,12 +1436,12 @@ namespace ascg {
 					//fShrinkVertical();
 
 					while (true) {
-						while (fStraightenGraph(false)) {
+						while (fStraightenGraph()) {
 							fShrinkVertical();
 							detail::PrintGrid(pGrid);
 							int k = 0;
 						}
-						if (!fStraightenGraph(true))
+						if (true || !fFixInterlocks())
 							break;
 						fShrinkVertical();
 						detail::PrintGrid(pGrid);
