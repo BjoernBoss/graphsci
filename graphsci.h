@@ -815,7 +815,7 @@ namespace ascg {
 				*	and afterwards duplicate the line before and after to ensure three consecutive empty spots */
 				auto [xEmpty, yEmpty] = fCreateEmptyCell((leftwards ? x - 1 : x + 1), y, leftwards);
 				fInsertBlankRow(yEmpty++);
-				fInsertBlankRow(yEmpty);
+				fInsertBlankRow(yEmpty + 1);
 
 				/* insert the vertical connection through the empty three spots, which will now be on the other side of the corner */
 				pGrid[yEmpty - 1][xEmpty].kind = (leftwards ? detail::CellKind::rightBottom : detail::CellKind::leftBottom);
