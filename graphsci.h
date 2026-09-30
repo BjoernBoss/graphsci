@@ -719,15 +719,8 @@ namespace ascg {
 				/* check if the entire grid needs to be widened to accomodate the shifting of the affected
 				*	cells (to ensure all upcoming operations can perform the shifts without checking bounds) */
 				auto shiftIntoRange = std::ranges::subrange(pGrid[y].begin() + (leftwards ? 0 : x + 1), (leftwards ? pGrid[y].begin() + x : pGrid[y].end()));
-				if (!std::ranges::any_of(shiftIntoRange, [](auto v) { return (v == detail::CellKind::empty); }, &detail::Cell::kind)) {
-					size_t index = (leftwards ? 0 : pGrid[y].size());
-
-					/* increase the grid accordingly and patch the index */
-					for (size_t i = 0; i < pGrid.size(); ++i)
-						pGrid[i].insert(pGrid[i].begin() + index, detail::Cell{});
-					if (leftwards)
-						++x;
-				}
+				if (!std::ranges::any_of(shiftIntoRange, [](auto v) { return (v == detail::CellKind::empty); }, &detail::Cell::kind))
+					x = fInsertEmptyColumn(leftwards, x);
 
 				/* setup the slice to move the previous entries (may invalidate references) */
 				std::vector<size_t> slice(pGrid[y].size(), detail::SlotUnused);
@@ -799,42 +792,25 @@ namespace ascg {
 				}
 				return{ x, y };
 			}
-			void fInsertBlankRow(size_t index) const {
+			void fInsertNullRow(size_t index) const {
 				detail::Row& row = *pGrid.emplace(pGrid.begin() + index);
 				detail::Row& prev = pGrid[index - 1];
 				detail::Row& next = pGrid[index + 1];
 				row.reserve(prev.size());
 
-				/* insert a blank row at index, which only consists of vertical edges or empty space */
+				/* insert a null row at index, which only consists of vertical edges or empty space */
 				for (size_t i = 0; i < prev.size(); ++i)
 					row.push_back({ (prev[i].anyBottom() || next[i].anyTop()) ? detail::CellKind::vertical : detail::CellKind::empty });
 			}
-			std::pair<size_t, size_t> fCreateCornerDetour(size_t x, size_t y, bool leftwards) const {
-				/* ensure an empty space exists exists on the other side of the corner to bend arouond (caller
-				*	must guarantee that the corner does not point into the empty spot to prevent invalid graphs)
-				*	and afterwards duplicate the line before and after to ensure three consecutive empty spots */
-				auto [xEmpty, yEmpty] = fCreateEmptyCell((leftwards ? x - 1 : x + 1), y, leftwards);
-				fInsertBlankRow(yEmpty++);
-				fInsertBlankRow(yEmpty + 1);
+			size_t fInsertEmptyColumn(bool leftSide, size_t index) const {
+				size_t where = (leftSide ? 0 : pGrid[0].size());
 
-				/* insert the vertical connection through the empty three spots, which will now be on the other side of the corner */
-				pGrid[yEmpty - 1][xEmpty].kind = (leftwards ? detail::CellKind::rightBottom : detail::CellKind::leftBottom);
-				pGrid[yEmpty][xEmpty].kind = pGrid[yEmpty][xEmpty].addVertical();
-				pGrid[yEmpty + 1][xEmpty].kind = (leftwards ? detail::CellKind::rightTop : detail::CellKind::leftTop);
-				xEmpty = (leftwards ? xEmpty + 1 : xEmpty - 1);
+				/* insert the new empty cells */
+				for (size_t i = 0; i < pGrid.size(); ++i)
+					pGrid[i].insert(pGrid[i].begin() + where, detail::Cell{});
 
-				/* insert the horizontal connections for the old transition to connect to the new detour */
-				pGrid[yEmpty - 1][xEmpty].kind = pGrid[yEmpty - 1][xEmpty].addHorizontal();
-				pGrid[yEmpty + 1][xEmpty].kind = pGrid[yEmpty + 1][xEmpty].addHorizontal();
-				xEmpty = (leftwards ? xEmpty + 1 : xEmpty - 1);
-
-				/* patch the original transition to connect to the detour */
-				pGrid[yEmpty - 1][xEmpty].kind = (leftwards ? detail::CellKind::leftTop : detail::CellKind::rightTop);
-				pGrid[yEmpty][xEmpty].kind = pGrid[yEmpty][xEmpty].removeVertical();
-				pGrid[yEmpty + 1][xEmpty].kind = (leftwards ? detail::CellKind::leftBottom : detail::CellKind::rightBottom);
-
-				/* return the updated position of the original corner */
-				return { (leftwards ? xEmpty - 1 : xEmpty + 1), yEmpty };
+				/* check if the index needs to be moved */
+				return (leftSide ? index + 1 : index);
 			}
 
 		private:
@@ -1155,10 +1131,9 @@ namespace ascg {
 				/* find the target axis to reduce the indentation by */
 				target = (endIsNode ? xEnd : x);
 				while (target != xOther) {
-					bool valid = true;
-
-					/* check if the other corner is free */
-					if (!endIsNode && !detail::Inbetween(target, xOther, xEnd))
+					/* check if the own edge is free and if the other corner is free */
+					bool valid = (target == x || pGrid[y][target].kind == detail::CellKind::horizontal);
+					if (valid && !endIsNode && !detail::Inbetween(target, xOther, xEnd))
 						valid = (pGrid[yOther][target].kind == detail::CellKind::empty);
 
 					/* check the vertical axis from the primary corner to the height of the other corner */
@@ -1195,13 +1170,52 @@ namespace ascg {
 				}
 				return true;
 			}
-			bool fStraightenGraph() const {
+			ShiftResult fShiftCheckPreference(size_t y, size_t x, bool forwards) const {
+				size_t last = (forwards ? pGrid.size() - 1 : 0);
+
+				/* check if the transition actually exists and points towards the node */
+				if (y == last)
+					return ShiftResult::none;
+				y = detail::Towards(y, last);
+				if (forwards ? !pGrid[y][x].anyTop() : !pGrid[y][x].anyBottom())
+					return ShiftResult::none;
+
+				/* follow the strand until the first shift to the left or right
+				*	is encountered or until the next node has been passed */
+				while (pGrid[y][x].lineVertical()) {
+					if (std::ranges::any_of(pGrid[y], [](auto v) { return v == detail::CellKind::node; }, &detail::Cell::kind))
+						return ShiftResult::straight;
+					y = detail::Towards(y, last);
+				}
+				if (pGrid[y][x].cornerLeft())
+					return ShiftResult::left;
+				return (pGrid[y][x].cornerRight() ? ShiftResult::right : ShiftResult::straight);
+			}
+			void fInsertDualSwap(size_t y, size_t yOther, size_t xCorner, size_t xCross) const {
+				/* insert the empty row to be used (insert it away from the y-other) */
+				size_t yMove = (yOther > y ? y++ : y + 1);
+				fInsertNullRow(yMove);
+
+				/* move the original corner down to let the blocking transition be used the the original transition */
+				pGrid[y][xCross].kind = pGrid[y][xCorner].kind;
+
+				/* patch the original transition path to move into the original blocker */
+				pGrid[yMove][xCorner].kind = pGrid[y][xCorner].kind;
+				pGrid[y][xCorner].kind = detail::CellKind::vertical;
+				pGrid[yMove][xCross].kind = pGrid[y][xCross].mirrorFull();
+			}
+
+		private:
+			bool fStraightenGraph(bool leftShift) const {
 				/* find the next corner to pursue (iterate until one has been found or all have been checked) */
 				for (size_t y = 0; y < pGrid.size(); ++y) {
 					detail::Row& row = pGrid[y];
 					for (size_t x = 0; x < row.size(); ++x) {
 						detail::Cell& cell = row[x];
-						if (!cell.anyCorner())
+
+						/* check if the corner is a potential indented corner for this iteration (must have a corner
+						*	in the opposite direction in order to potentially want a change in the intended direction) */
+						if (!(leftShift ? cell.cornerRight() : cell.cornerLeft()))
 							continue;
 
 						/* resolve the indentation and check if a reduction path can be found and apply it */
@@ -1240,13 +1254,16 @@ namespace ascg {
 				}
 				return false;
 			}
-			bool fFixInterlocks() const {
+			bool fFixInterlocks(bool leftShift) const {
 				/* find the next corner to pursue (iterate until one has been found or all have been checked) */
 				for (size_t y = 0; y < pGrid.size(); ++y) {
 					detail::Row& row = pGrid[y];
 					for (size_t x = 0; x < row.size(); ++x) {
 						detail::Cell& cell = row[x];
-						if (!cell.anyCorner())
+
+						/* check if the corner is a potential indented corner for this iteration (must have a corner
+						*	in the opposite direction in order to potentially want a change in the intended direction) */
+						if (!(leftShift ? cell.cornerRight() : cell.cornerLeft()))
 							continue;
 
 						/* resolve the indentation and check if the current indentation is blocked by
@@ -1255,95 +1272,78 @@ namespace ascg {
 						if (!fMapIndentCorner(x, y, xOther, yOther, xEnd, target) || target != xOther)
 							continue;
 						bool endIsNode = (pGrid[yOther][xOther].kind == detail::CellKind::node);
-						bool leftwards = (x < xOther);
+						bool leftwards = (x < xOther), blockedTransition = false;
 
-						/* look for a corner of the blocker and ensure there is no node inbetween */
-						size_t xCorner = detail::Towards(xOther, x), yCorner = detail::Towards(y, yOther);
-						while (yCorner != yOther && !pGrid[yCorner][xCorner].anyCorner()) {
-							if (pGrid[yCorner][xCorner].kind == detail::CellKind::node)
-								return false;
-							yCorner = detail::Towards(yCorner, yOther);
+						/* check if there are any nodes or non-blocking corners in the way, in which case the
+						*	interlocking cannot be removed and otherwise look for the first blocking corner */
+						size_t xCorner = detail::Towards(xOther, x), yCorner = y;
+						for (size_t i : detail::MinMaxWalk{ y, yOther, true }) {
+							if (pGrid[i][xCorner].kind == detail::CellKind::node) {
+								blockedTransition = true;
+								break;
+							}
+							else if (leftwards ? pGrid[i][xCorner].cornerLeft() : pGrid[i][xCorner].cornerRight()) {
+								blockedTransition = true;
+								break;
+							}
+							else if (yCorner == y && pGrid[i][xCorner].anyCorner())
+								yCorner = i;
 						}
+						if (blockedTransition)
+							continue;
 
-						/* check if no corner has been found, which can only be the case
-						*	if the blocker spans the entire range of the original transition */
-						if (yCorner == yOther) {
-							/* check if both end in the same node, in which case they can be swapped */
-							if (pGrid[yOther][xCorner].kind == detail::CellKind::node && pGrid[yOther][x].kind == detail::CellKind::node) {
-								size_t yMove = (yOther > y ? y++ : y + 1);
-								fInsertBlankRow(yMove);
-
-								/* move the original corner down to let the blocking transition be used the the original transition */
-								pGrid[y][xCorner].kind = pGrid[y][x].kind;
-
-								/* patch the original transition path to move into the original blocker */
-								pGrid[yMove][x].kind = pGrid[y][x].kind;
-								pGrid[y][x].kind = detail::CellKind::vertical;
-								pGrid[yMove][xCorner].kind = pGrid[y][xCorner].mirrorFull();
+						/* check if no corner has been found, which can only be the case if the blocker spans the
+						*	entire range of the original transition (might result in reduction of crossings) */
+						if (yCorner == y) {
+							/* check if both end in the same node, in which case the transitions can be swapped */
+							if (pGrid[yOther][xCorner].kind == detail::CellKind::node && pGrid[yOther][xOther].kind == detail::CellKind::node) {
+								fInsertDualSwap(y, yOther, xOther, xCorner);
 								return true;
 							}
 
 							/* check if the blocked transition crosses the blocking transition again as nothing can otherwise be done */
 							if (pGrid[yOther][xCorner].kind != detail::CellKind::crossing)
-								return false;
+								continue;
 
-							/* insert detours at the two ends (detour the blocking transition; first the higher
-							*	positions, as the detour inserts new rows and may otherwise skew the other y position) */
-							if (yOther < y) {
-								x = fCreateCornerDetour(x, y, !leftwards).first;
-								fCreateCornerDetour(x, yOther, !leftwards);
-							}
-							else {
-								x = fCreateCornerDetour(x, yOther, !leftwards).first;
-								fCreateCornerDetour(x, y, !leftwards);
-							}
+							/* the two transitions are crossing but lay in parallel next to each other, in which case they can just be
+							*	swapped (first the higher positions, as the swap inserts new rows and may otherwise skew the other y position) */
+							size_t yPrev = std::min<size_t>(y, yOther), yNext = std::max<size_t>(y, yOther);
+							fInsertDualSwap(yNext, yPrev, xOther, xCorner);
+							fInsertDualSwap(yPrev, yNext, xOther, xCorner);
 							return true;
 						}
 
-						/* ensure that the preferred direction points away from the grids center,
-						*	otherwise, the other side of this interlocking will handle it */
-						size_t lineWidth = pGrid[yCorner].size();
-						while (pGrid[yCorner][lineWidth - 1].kind == detail::CellKind::empty)
-							--lineWidth;
-						for (size_t i = 0; pGrid[yCorner][i].kind == detail::CellKind::empty; ++i)
-							--lineWidth;
-						if (leftwards ? (xCorner * 2 > lineWidth) : (xCorner * 2 < lineWidth))
-							return false;
+						/* check if the index lies right at the bounds, in which case
+						*	the grid needs to be extended to provide space for a detour */
+						if (leftwards ? xCorner == 0 : xCorner + 1 == pGrid[yCorner].size())
+							xCorner = fInsertEmptyColumn(leftwards, xCorner);
 
-						/* check if the corner points into the opposite direction the locked
-						*	corner wants to move, in which case they are blocking each other */
-						if (leftwards ? !pGrid[yCorner][xCorner].cornerRight() : !pGrid[yCorner][xCorner].cornerLeft())
-							return false;
+						/* ensure an empty space exists exists on the other side of the corner to bend arouond (caller
+						*	must guarantee that the corner does not point into the empty spot to prevent invalid graphs)
+						*	and afterwards duplicate the line before and after to ensure three consecutive empty spots */
+						auto [xEmpty, yEmpty] = fCreateEmptyCell((leftwards ? xCorner - 1 : xCorner + 1), yCorner, leftwards);
+						fInsertNullRow(yEmpty++);
+						fInsertNullRow(yEmpty + 1);
 
-						/* insert the detour for the original transition to pass on the other side of the blocking corner */
-						fCreateCornerDetour(xCorner, yCorner, leftwards);
+						/* insert the vertical connection through the empty three spots, which will now be on the other side of the corner */
+						pGrid[yEmpty - 1][xEmpty].kind = (leftwards ? detail::CellKind::rightBottom : detail::CellKind::leftBottom);
+						pGrid[yEmpty][xEmpty].kind = pGrid[yEmpty][xEmpty].addVertical();
+						pGrid[yEmpty + 1][xEmpty].kind = (leftwards ? detail::CellKind::rightTop : detail::CellKind::leftTop);
+						xEmpty = (leftwards ? xEmpty + 1 : xEmpty - 1);
+
+						/* insert the horizontal connections for the old transition to connect to the new detour */
+						pGrid[yEmpty - 1][xEmpty].kind = pGrid[yEmpty - 1][xEmpty].addHorizontal();
+						pGrid[yEmpty + 1][xEmpty].kind = pGrid[yEmpty + 1][xEmpty].addHorizontal();
+						xEmpty = (leftwards ? xEmpty + 1 : xEmpty - 1);
+
+						/* patch the original transition to connect to the detour */
+						pGrid[yEmpty - 1][xEmpty].kind = (leftwards ? detail::CellKind::leftTop : detail::CellKind::rightTop);
+						pGrid[yEmpty][xEmpty].kind = pGrid[yEmpty][xEmpty].removeVertical();
+						pGrid[yEmpty + 1][xEmpty].kind = (leftwards ? detail::CellKind::leftBottom : detail::CellKind::rightBottom);
 						return true;
 					}
 				}
 				return false;
-			}
-
-		private:
-			ShiftResult fShiftCheckPreference(size_t y, size_t x, bool forwards) const {
-				size_t last = (forwards ? pGrid.size() - 1 : 0);
-
-				/* check if the transition actually exists and points towards the node */
-				if (y == last)
-					return ShiftResult::none;
-				y = detail::Towards(y, last);
-				if (forwards ? !pGrid[y][x].anyTop() : !pGrid[y][x].anyBottom())
-					return ShiftResult::none;
-
-				/* follow the strand until the first shift to the left or right
-				*	is encountered or until the next node has been passed */
-				while (pGrid[y][x].lineVertical()) {
-					if (std::ranges::any_of(pGrid[y], [](auto v) { return v == detail::CellKind::node; }, &detail::Cell::kind))
-						return ShiftResult::straight;
-					y = detail::Towards(y, last);
-				}
-				if (pGrid[y][x].cornerLeft())
-					return ShiftResult::left;
-				return (pGrid[y][x].cornerRight() ? ShiftResult::right : ShiftResult::straight);
 			}
 			bool fShiftNodes() const {
 				/* find the next node and check if it should be shifted (iterate until one has been found or all have been checked;
@@ -1435,19 +1435,33 @@ namespace ascg {
 					//while (fStraightenGraph());
 					//fShrinkVertical();
 
-					while (true) {
-						while (fStraightenGraph()) {
-							fShrinkVertical();
-							detail::PrintGrid(pGrid);
-							int k = 0;
+					size_t tCount = 0;
+					for (bool dirty = false;; dirty = false) {
+						for (size_t dir = 0; dir < 2; ++dir) {
+							bool leftOnly = (dir == 0);
+
+							while (true) {
+								while (fStraightenGraph(leftOnly)) {
+									dirty = true;
+									fShrinkVertical();
+									detail::PrintGrid(pGrid);
+									int k = 0;
+								}
+								if (!fFixInterlocks(leftOnly))
+									break;
+								dirty = true;
+								fShrinkVertical();
+								detail::PrintGrid(pGrid);
+								int k = 0;
+							}
 						}
-						if (true || !fFixInterlocks())
-							break;
+
+
 						fShrinkVertical();
 						detail::PrintGrid(pGrid);
-						int k = 0;
+						if (!dirty || ++tCount >= 20)
+							break;
 					}
-					fShrinkVertical();
 
 					if (i >= 40)
 						break;
@@ -1457,6 +1471,7 @@ namespace ascg {
 					/* shifting nodes requires intermediate rows between any two neighboring nodes */
 					if (!fShiftNodes())
 						break;
+					detail::PrintGrid(pGrid);
 				}
 
 				detail::PrintGrid(pGrid);
