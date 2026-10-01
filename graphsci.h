@@ -629,14 +629,6 @@ namespace ascg {
 
 		class GridBuilder {
 		private:
-			enum class ShiftResult : uint8_t {
-				none,
-				left,
-				right,
-				straight
-			};
-
-		private:
 			const std::vector<detail::Layer>& pLayers;
 			mutable std::vector<detail::Row> pGrid;
 
@@ -1170,27 +1162,6 @@ namespace ascg {
 				}
 				return true;
 			}
-			ShiftResult fShiftCheckPreference(size_t y, size_t x, bool forwards) const {
-				size_t last = (forwards ? pGrid.size() - 1 : 0);
-
-				/* check if the transition actually exists and points towards the node */
-				if (y == last)
-					return ShiftResult::none;
-				y = detail::Towards(y, last);
-				if (forwards ? !pGrid[y][x].anyTop() : !pGrid[y][x].anyBottom())
-					return ShiftResult::none;
-
-				/* follow the strand until the first shift to the left or right
-				*	is encountered or until the next node has been passed */
-				while (pGrid[y][x].lineVertical()) {
-					if (std::ranges::any_of(pGrid[y], [](auto v) { return v == detail::CellKind::node; }, &detail::Cell::kind))
-						return ShiftResult::straight;
-					y = detail::Towards(y, last);
-				}
-				if (pGrid[y][x].cornerLeft())
-					return ShiftResult::left;
-				return (pGrid[y][x].cornerRight() ? ShiftResult::right : ShiftResult::straight);
-			}
 			void fInsertDualSwap(size_t y, size_t yOther, size_t xCorner, size_t xCross) const {
 				/* insert the empty row to be used (insert it away from the y-other) */
 				size_t yMove = (yOther > y ? y++ : y + 1);
@@ -1204,18 +1175,71 @@ namespace ascg {
 				pGrid[y][xCorner].kind = detail::CellKind::vertical;
 				pGrid[yMove][xCross].kind = pGrid[y][xCross].mirrorFull();
 			}
+			int8_t fShiftCheckPreference(size_t y, size_t x, bool forwards, bool leftwards) const {
+				enum ShiftScore : int8_t {
+					extendShort = -2,
+					addShift = -2,
+					extendShift = -1,
+					uncertain = 0,
+					nothing = 0,
+					reduceShift = 1,
+					dropShift = 3
+				};
+
+				/* check if the transition actually exists and points towards the node */
+				size_t last = (forwards ? pGrid.size() - 1 : 0);
+				if (y == last)
+					return ShiftScore::nothing;
+				y = detail::Towards(y, last);
+				if (forwards ? !pGrid[y][x].anyTop() : !pGrid[y][x].anyBottom())
+					return ShiftScore::nothing;
+
+				/* follow the strand until the first shift to the left or right is
+				*	encountered or until the connection is considered blocked */
+				while (pGrid[y][x].lineVertical()) {
+					detail::Row& row = pGrid[y];
+					y = detail::Towards(y, last);
+
+					/* check if the connection is blocked to the checked side */
+					if (leftwards) for (size_t i = x; i > 0 && row[i - 1].kind != detail::CellKind::empty; --i) {
+						if (row[i - 1].kind == detail::CellKind::node)
+							return ShiftScore::addShift;
+					}
+					else for (size_t i = x + 1; i < row.size() && row[i].kind != detail::CellKind::empty; ++i) {
+						if (row[i].kind == detail::CellKind::node)
+							return ShiftScore::addShift;
+					}
+				}
+
+				/* evaluate the final pull direction */
+				if (pGrid[y][x].cornerLeft()) {
+					bool single = pGrid[y][x - 1].cornerRight();
+					if (!leftwards)
+						return (single ? ShiftScore::extendShort : ShiftScore::extendShift);
+					return (single ? ShiftScore::dropShift : ShiftScore::reduceShift);
+				}
+				if (pGrid[y][x].cornerRight()) {
+					bool single = pGrid[y][x + 1].cornerLeft();
+					if (leftwards)
+						return (single ? ShiftScore::extendShort : ShiftScore::extendShift);
+					return (single ? ShiftScore::dropShift : ShiftScore::reduceShift);
+				}
+				return ShiftScore::uncertain;
+			}
 
 		private:
-			bool fStraightenGraph(bool leftShift) const {
+			bool fStraightenGraph(bool leftShift, bool outwards) const {
 				/* find the next corner to pursue (iterate until one has been found or all have been checked) */
 				for (size_t y = 0; y < pGrid.size(); ++y) {
 					detail::Row& row = pGrid[y];
+					size_t halfRow = row.size() / 2;
 					for (size_t x = 0; x < row.size(); ++x) {
 						detail::Cell& cell = row[x];
 
-						/* check if the corner is a potential indented corner for this iteration (must have a corner
-						*	in the opposite direction in order to potentially want a change in the intended direction) */
-						if (!(leftShift ? cell.cornerRight() : cell.cornerLeft()))
+						/* select the allowed direction to be used and check if the corner is a potential indented corner for this iteration
+						*	(must have a corner in the opposite direction in order to potentially want a change in the intended direction) */
+						bool dirLeftwards = (outwards ? (x <= halfRow) : leftShift);
+						if (!(dirLeftwards ? cell.cornerRight() : cell.cornerLeft()))
 							continue;
 
 						/* resolve the indentation and check if a reduction path can be found and apply it */
@@ -1223,6 +1247,11 @@ namespace ascg {
 						if (!fMapIndentCorner(x, y, xOther, yOther, xEnd, target) || target == xOther)
 							continue;
 						bool endIsNode = (pGrid[yOther][xOther].kind == detail::CellKind::node);
+
+						/* check if this is an outwards movement and the other side sits on the other side of
+						*	the center, in which case the move needs to be skipped to prevent oscillations */
+						if (outwards && (xOther <= halfRow) != (x <= halfRow))
+							continue;
 
 						/* move the vertical line over */
 						for (size_t i : detail::MinMaxWalk{ y, yOther, true }) {
@@ -1345,40 +1374,37 @@ namespace ascg {
 				}
 				return false;
 			}
-			bool fShiftNodes() const {
+			bool fShiftNodes(bool leftShift, size_t complexity) const {
 				/* find the next node and check if it should be shifted (iterate until one has been found or all have been checked;
 				*	Important: two rows back-to-back must not both contain nodes, there must always exist an intermediate row) */
 				for (size_t y = 0; y < pGrid.size(); ++y) {
 					detail::Row& row = pGrid[y];
 
 					/* check if the row contains a node */
-					size_t first = std::ranges::find(row, detail::CellKind::node, &detail::Cell::kind) - row.begin();
+					size_t first = std::ranges::find(row, detail::CellKind::node, &detail::Cell::kind) - row.begin(), last = 0;
 					if (first >= row.size())
 						continue;
 
-					/* count the preferences of all transitions going out of the node (until the next node has been reached) */
-					size_t leftShift = 0, rightShift = 0, straight = 0, last = 0;
+					/* count the preferences of all transitions going out of the node and find the end of the current node */
+					intptr_t score = 0;
 					for (size_t i = first; (i < row.size() && row[i].kind == detail::CellKind::node); ++i) {
 						last = i;
-						if (ShiftResult shift = fShiftCheckPreference(y, i, false); shift != ShiftResult::none)
-							++(shift == ShiftResult::straight ? straight : (shift == ShiftResult::left ? leftShift : rightShift));
-						if (ShiftResult shift = fShiftCheckPreference(y, i, true); shift != ShiftResult::none)
-							++(shift == ShiftResult::straight ? straight : (shift == ShiftResult::left ? leftShift : rightShift));
+						score += fShiftCheckPreference(y, i, false, leftShift);
+						score += fShiftCheckPreference(y, i, true, leftShift);
 					}
 
-					/* check if there is a potential beenfit in shifting the node */
-					if (leftShift < 1 + rightShift + straight && rightShift < 1 + leftShift + straight)
-						continue;
+					/* check if the neighboring spot is not empty, which will add to the penalty */
+					if (leftShift) for (size_t i = first; i > 0 && row[i - 1].kind != detail::CellKind::empty; --i)
+						score -= 2;
+					else for (size_t i = last + 1; i < row.size() && row[i].kind != detail::CellKind::empty; ++i)
+						score -= 2;
 
-					/* check if the neighboring slot is free to be used */
-					bool leftwards = (leftShift >= 1 + rightShift + straight);
-					if (leftwards && first > 0 && row[first - 1].kind != detail::CellKind::empty)
-						continue;
-					else if (!leftwards && last + 1 < row.size() && row[last + 1].kind != detail::CellKind::empty)
+					/* check if there is a potential beenfit in shifting the node */
+					if (score <= static_cast<intptr_t>(complexity))
 						continue;
 
 					/* move the node over by ensuring that the spot next to it becomes empty */
-					fCreateEmptyCell((leftwards ? last : first), y, leftwards);
+					fCreateEmptyCell((leftShift ? last : first), y, leftShift);
 					return true;
 				}
 				return false;
@@ -1431,29 +1457,69 @@ namespace ascg {
 				fConstructGrid();
 				detail::PrintGrid(pGrid);
 
-				for (size_t i = 0;; ++i) {
-					//while (fStraightenGraph());
-					//fShrinkVertical();
+				const auto straightenGraph = [this]() -> void {
+					/* first straighten across the graph and then finally outwards */
+					for (size_t i = 0; i < 3; ++i) {
+						while (fStraightenGraph(i == 0, i == 2))
+							detail::PrintGrid(pGrid);
+						fShrinkVertical();
+					}
+				};
+				const auto fixInterlocks = [this](bool leftwards) -> bool {
+					bool dirty = false;
+					while (fFixInterlocks(leftwards)) {
+						dirty = true;
+						while (fStraightenGraph(leftwards, false))
+							fShrinkVertical();
+					}
+					detail::PrintGrid(pGrid);
+					return dirty;
+				};
 
+				for (size_t i = 0; i < 4; ++i) {
+					for (size_t j = 0; j < 4; ++j) {
+						while (fixInterlocks(true));
+						while (fixInterlocks(false));
+						straightenGraph();
+					}
+					detail::PrintGrid(pGrid);
+					int k = 0;
+
+					while (fShiftNodes(true, i / 3)) {
+						straightenGraph();
+						detail::PrintGrid(pGrid);
+						int k = 0;
+					}
+					while (fShiftNodes(false, i / 3)) {
+						straightenGraph();
+						detail::PrintGrid(pGrid);
+						int k = 0;
+					}
+				}
+
+				if (false) for (size_t i = 0;; ++i) {
 					size_t tCount = 0;
 					for (bool dirty = false;; dirty = false) {
 						for (size_t dir = 0; dir < 2; ++dir) {
 							bool leftOnly = (dir == 0);
 
 							while (true) {
-								while (fStraightenGraph(leftOnly)) {
+								while (fStraightenGraph(leftOnly, false)) {
 									dirty = true;
 									fShrinkVertical();
 									detail::PrintGrid(pGrid);
 									int k = 0;
 								}
-								if (!fFixInterlocks(leftOnly))
-									break;
-								dirty = true;
-								fShrinkVertical();
-								detail::PrintGrid(pGrid);
-								int k = 0;
+								if (fShiftNodes(leftOnly, false)) {
+									dirty = true;
+									fShrinkVertical();
+									detail::PrintGrid(pGrid);
+									continue;
+								}
+								break;
 							}
+
+
 						}
 
 
@@ -1469,9 +1535,9 @@ namespace ascg {
 					detail::PrintGrid(pGrid);
 
 					/* shifting nodes requires intermediate rows between any two neighboring nodes */
-					if (!fShiftNodes())
-						break;
-					detail::PrintGrid(pGrid);
+					//if (!fShiftNodes())
+					//	break;
+					//detail::PrintGrid(pGrid);
 				}
 
 				detail::PrintGrid(pGrid);
