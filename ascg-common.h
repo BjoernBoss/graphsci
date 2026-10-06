@@ -27,6 +27,8 @@
 *	straighten up any lines
 *
 *	grid creation: dont account for number of crossings anymore for minimum size?
+*
+*	add Alignment for fix-interlocks as well?
 */
 #include <ustring/ustring.h>
 
