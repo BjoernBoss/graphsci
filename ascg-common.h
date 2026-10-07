@@ -19,6 +19,8 @@
 *	add self-loops?/double-edges?/directions?
 *	finish layer-builder (cleanup)
 *
+*	finish grid-builder: Node shifting
+*
 *	only shift nodes with highest score
 *	update detail::LayoutGraph to default offset preferred positions to be centered
 *
@@ -28,7 +30,6 @@
 *
 *	grid creation: dont account for number of crossings anymore for minimum size?
 *
-*	add Alignment for fix-interlocks as well?
 */
 #include <ustring/ustring.h>
 
@@ -41,6 +42,18 @@ namespace ascg::detail {
 		std::vector<detail::Layer> layers(grid.size());
 		for (const std::string& line : detail::Renderer{ layers, grid }.draw(0).first)
 			str::PrintLn('[', line, ']');
+	}
+
+	/* use FNV-1a hashing to hash the point order (to simplify the algorihm, states are no
+	*	identified by identical graph state, but rather by identical hash and edge count) */
+	static constexpr uint64_t HashInit = 0xcbf29ce484222325;
+	uint64_t HashJoin(uint64_t hash, auto value) {
+		uint64_t _value = static_cast<uint64_t>(value);
+		for (size_t i = 0; i < sizeof(value); ++i) {
+			hash = (hash ^ static_cast<uint8_t>(_value)) * 0x00000100000001b3;
+			_value >>= 8;
+		}
+		return hash;
 	}
 }
 

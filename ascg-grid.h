@@ -515,8 +515,6 @@ namespace ascg::detail {
 		}
 		void fConstructGrid() const {
 			pGrid.clear();
-			if (pLayers.empty())
-				return;
 
 			/* compute the minimum width to give to the graph (minimum
 			*	required plus maximum number of crossings between two layers) */
@@ -739,68 +737,6 @@ namespace ascg::detail {
 			pGrid[yInside][xSpacer].kind = pGrid[yOutside][xSpacer].mirrorHorizontal();
 			return true;
 		}
-		intptr_t fShiftCheckPreference(size_t y, size_t x, bool forwards, bool leftwards) const {
-			enum ShiftScore : intptr_t {
-				extendShort = -2,
-				addShift = -2,
-				extendShift = -1,
-				uncertain = 0,
-				nothing = 0,
-				reduceShift = 1,
-				dropShift = 3
-			};
-
-			/* check if the transition actually exists and points towards the node */
-			size_t last = (forwards ? pGrid.size() - 1 : 0);
-			if (y == last)
-				return ShiftScore::nothing;
-			y = detail::Towards(y, last);
-			if (forwards ? !pGrid[y][x].anyTop() : !pGrid[y][x].anyBottom())
-				return ShiftScore::nothing;
-
-			/* follow the strand until the first shift to the left or right is
-			*	encountered or until the connection is considered blocked */
-			while (pGrid[y][x].lineVertical()) {
-				detail::Row& row = pGrid[y];
-				y = detail::Towards(y, last);
-
-				/* check if the connection is blocked to the checked side */
-				if (leftwards) for (size_t i = x; i > 0 && !row[i - 1].isEmpty(); --i) {
-					if (row[i - 1].isNode())
-						return ShiftScore::addShift;
-				}
-				else for (size_t i = x + 1; i < row.size() && !row[i].isEmpty(); ++i) {
-					if (row[i].isNode())
-						return ShiftScore::addShift;
-				}
-			}
-
-			/* evaluate the final pull direction */
-			if (pGrid[y][x].cornerLeft()) {
-				bool single = pGrid[y][x - 1].cornerRight();
-				if (!leftwards)
-					return (single ? ShiftScore::extendShort : ShiftScore::extendShift);
-				return (single ? ShiftScore::dropShift : ShiftScore::reduceShift);
-			}
-			if (pGrid[y][x].cornerRight()) {
-				bool single = pGrid[y][x + 1].cornerLeft();
-				if (leftwards)
-					return (single ? ShiftScore::extendShort : ShiftScore::extendShift);
-				return (single ? ShiftScore::dropShift : ShiftScore::reduceShift);
-			}
-
-			/* the final position must be ending in a node,
-			*	check if there is space in the given direction */
-			const detail::Row& prev = pGrid[forwards ? y - 1 : y + 1];
-			if (leftwards ? x == 0 : x + 1 == prev.size())
-				return ShiftScore::nothing;
-			const detail::Cell& neighbor = prev[leftwards ? x - 1 : x + 1];
-			if (forwards ? neighbor.anyBottom() : neighbor.anyTop())
-				return ShiftScore::addShift;
-			return ShiftScore::nothing;
-		}
-
-	private:
 		bool fStraightenGraph(Alignment align) const {
 			/* find the next corner to pursue (iterate until one has been found or all have been checked) */
 			for (size_t y = 0; y < pGrid.size(); ++y) {
@@ -953,6 +889,76 @@ namespace ascg::detail {
 				}
 			}
 			return false;
+		}
+
+	private:
+		intptr_t fShiftCheckPreference(size_t y, size_t x, bool forwards, bool leftwards) const {
+			enum ShiftScore : intptr_t {
+				extendShort = -2,
+				addShift = -2,
+				extendShift = -1,
+				uncertain = 0,
+				nothing = 0,
+				reduceShift = 1,
+				dropShift = 3
+			};
+
+			/* check if the transition actually exists and points towards the node */
+			size_t last = (forwards ? pGrid.size() - 1 : 0);
+			if (y == last)
+				return ShiftScore::nothing;
+			y = detail::Towards(y, last);
+			if (forwards ? !pGrid[y][x].anyTop() : !pGrid[y][x].anyBottom())
+				return ShiftScore::nothing;
+
+			/* follow the strand until the first shift to the left or right is
+			*	encountered or until the connection is considered blocked */
+			while (pGrid[y][x].lineVertical()) {
+				detail::Row& row = pGrid[y];
+				y = detail::Towards(y, last);
+
+				/* check if the connection is blocked to the checked side */
+				if (leftwards) for (size_t i = x; i > 0 && !row[i - 1].isEmpty(); --i) {
+					if (row[i - 1].isNode())
+						return ShiftScore::addShift;
+				}
+				else for (size_t i = x + 1; i < row.size() && !row[i].isEmpty(); ++i) {
+					if (row[i].isNode())
+						return ShiftScore::addShift;
+				}
+			}
+
+			/* evaluate the final pull direction */
+			if (pGrid[y][x].cornerLeft()) {
+				bool single = pGrid[y][x - 1].cornerRight();
+				if (!leftwards)
+					return (single ? ShiftScore::extendShort : ShiftScore::extendShift);
+				return (single ? ShiftScore::dropShift : ShiftScore::reduceShift);
+			}
+			if (pGrid[y][x].cornerRight()) {
+				bool single = pGrid[y][x + 1].cornerLeft();
+				if (leftwards)
+					return (single ? ShiftScore::extendShort : ShiftScore::extendShift);
+				return (single ? ShiftScore::dropShift : ShiftScore::reduceShift);
+			}
+
+			/* the final position must be ending in a node,
+			*	check if there is space in the given direction */
+			const detail::Row& prev = pGrid[forwards ? y - 1 : y + 1];
+			if (leftwards ? x == 0 : x + 1 == prev.size())
+				return ShiftScore::nothing;
+			const detail::Cell& neighbor = prev[leftwards ? x - 1 : x + 1];
+			if (forwards ? neighbor.anyBottom() : neighbor.anyTop())
+				return ShiftScore::addShift;
+			return ShiftScore::nothing;
+		}
+		uint64_t fMeasureHash() const {
+			uint64_t hash = detail::HashInit;
+			for (const detail::Row& row : pGrid) {
+				for (const detail::Cell& cell : row)
+					hash = detail::HashJoin(hash, cell.kind);
+			}
+			return hash;
 		}
 		bool fShiftNodes(size_t complexity) const {
 			intptr_t bestScore = -1, bestRow = 0, bestEmpty = 0;
@@ -1199,37 +1205,43 @@ namespace ascg::detail {
 			}
 		}
 
+	private:
+		void fBuildStraighten() const {
+			/* first straighten across the graph and then finally outwards
+			*	and shrink the graph to remove unnecessary rows and columns */
+			for (auto align : { Alignment::leftwards, Alignment::rightwards, Alignment::outwards }) {
+				while (fStraightenGraph(align));
+				fShrinkVertical();
+				fShrinkHorizontal();
+			}
+		}
+		void fBuildFixInterlocks() const {
+			/* iterate twice for each directions to allow connections to settle (not more to prevent
+			*	oscillations; interlocks are rare and will therefore not be triggered frequently) */
+			for (size_t i = 0; i < 4; ++i) {
+				bool leftwards = (i % 2 == 0);
+
+				/* fix all interlocks into the given direction and propagate any changes out of the graph */
+				while (fFixInterlocks(leftwards))
+					while (fStraightenGraph(leftwards ? Alignment::leftwards : Alignment::rightwards));
+			}
+
+			/* straighten the final graph one final complete time (automatically shrinks) */
+			fBuildStraighten();
+		}
+
 	public:
 		std::vector<detail::Row> build() const {
+			/* check if the layers are empty, in which case nothing needs to be done, and
+			*	otherwise create the initial grid and straighten it (cannot be empty anymore) */
+			if (pLayers.empty())
+				return {};
 			fConstructGrid();
+			fBuildStraighten();
 			detail::PrintGrid(pGrid);
 
-			const auto straightenGraph = [this]() -> void {
-				/* first straighten across the graph and then finally outwards */
-				for (auto align : { Alignment::leftwards, Alignment::rightwards, Alignment::outwards }) {
-					while (fStraightenGraph(align));
-					fShrinkVertical();
-					fShrinkHorizontal();
-				}
-			};
-			const auto fixInterlocks = [this](bool leftwards) -> bool {
-				bool dirty = false;
-				while (fFixInterlocks(leftwards)) {
-					dirty = true;
-					while (fStraightenGraph(leftwards ? Alignment::leftwards : Alignment::rightwards));
-					fShrinkVertical();
-					fShrinkHorizontal();
-				}
-				detail::PrintGrid(pGrid);
-				return dirty;
-			};
-
 			for (size_t i = 0; i < 2; ++i) {
-				for (size_t j = 0; j < 2; ++j) {
-					while (fixInterlocks(true));
-					while (fixInterlocks(false));
-					straightenGraph();
-				}
+				fBuildFixInterlocks();
 				detail::PrintGrid(pGrid);
 				int k = 0;
 
@@ -1250,59 +1262,19 @@ namespace ascg::detail {
 				// find a graph of horizontals through the graph, and shift by it
 
 				if (fShiftNodes(0)) {
-					straightenGraph();
+					fBuildStraighten();
 					detail::PrintGrid(pGrid);
 					--i;
 				}
 			}
 
-			if (false) for (size_t i = 0;; ++i) {
-				size_t tCount = 0;
-				for (bool dirty = false;; dirty = false) {
-					for (size_t dir = 0; dir < 2; ++dir) {
-						bool leftOnly = (dir == 0);
-
-						while (true) {
-							while (fStraightenGraph(leftOnly ? Alignment::leftwards : Alignment::rightwards)) {
-								dirty = true;
-								fShrinkVertical();
-								detail::PrintGrid(pGrid);
-								int k = 0;
-							}
-							if (fShiftNodes(0)) {
-								dirty = true;
-								fShrinkVertical();
-								detail::PrintGrid(pGrid);
-								continue;
-							}
-							break;
-						}
-
-
-					}
-
-
-					fShrinkVertical();
-					detail::PrintGrid(pGrid);
-					if (!dirty || ++tCount >= 20)
-						break;
-				}
-
-				if (i >= 40)
-					break;
-
-				detail::PrintGrid(pGrid);
-
-				/* shifting nodes requires intermediate rows between any two neighboring nodes */
-				//if (!fShiftNodes())
-				//	break;
-				//detail::PrintGrid(pGrid);
-			}
-
-			detail::PrintGrid(pGrid);
+			/* perform the final full compression (will already be shrunk in both directions; compression on the
+			*	horizontal is not necessary, as the graph straightening operations are developed to essentially
+			*	perform the horizontal compression to the point that the simple shrinkening is enough) */
 			fCompressVertical();
 			detail::PrintGrid(pGrid);
 
+			/* return the complete generated grid */
 			std::vector<detail::Row> grid;
 			std::swap(pGrid, grid);
 			return grid;
