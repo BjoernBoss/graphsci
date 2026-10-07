@@ -19,6 +19,12 @@ namespace ascg::detail {
 	};
 	struct Cell {
 		detail::CellKind kind = detail::CellKind::empty;
+		bool isEmpty() const {
+			return (kind == detail::CellKind::empty);
+		}
+		bool isNode() const {
+			return (kind == detail::CellKind::node);
+		}
 		bool cornerLeft() const {
 			return (kind == detail::CellKind::leftTop || kind == detail::CellKind::leftBottom);
 		}
@@ -40,6 +46,9 @@ namespace ascg::detail {
 		bool anyLeft() const {
 			return (cornerLeft() || lineHorizontal());
 		}
+		bool anyRight() const {
+			return (cornerRight() || lineHorizontal());
+		}
 		bool anyTop() const {
 			return (cornerTop() || lineVertical());
 		}
@@ -53,6 +62,12 @@ namespace ascg::detail {
 			return (kind == detail::CellKind::empty || kind == detail::CellKind::vertical);
 		}
 		bool freeVertical() const {
+			return (kind == detail::CellKind::empty || kind == detail::CellKind::horizontal);
+		}
+		bool simpleVertical() const {
+			return (kind == detail::CellKind::empty || kind == detail::CellKind::vertical);
+		}
+		bool simpleHorizontal() const {
 			return (kind == detail::CellKind::empty || kind == detail::CellKind::horizontal);
 		}
 		detail::CellKind mirrorHorizontal() const {
@@ -188,7 +203,7 @@ namespace ascg::detail {
 			return where;
 		}
 		std::pair<size_t, size_t> fCreateEmptyCell(size_t x, size_t y, bool leftwards) const {
-			if (pGrid[y][x].kind == detail::CellKind::empty)
+			if (pGrid[y][x].isEmpty())
 				return{ x, y };
 
 			/* check if the entire grid needs to be widened to accomodate the shifting of the affected
@@ -211,13 +226,13 @@ namespace ascg::detail {
 				if (leftwards) for (size_t i = x + 1; i > 0; --i) {
 					if (slice[i - 1] != detail::SlotUnused)
 						--slice[i - 1];
-					else if (i <= x && cur[i - 1].kind == detail::CellKind::empty)
+					else if (i <= x && cur[i - 1].isEmpty())
 						break;
 				}
 				else for (size_t i = x; i < cur.size(); ++i) {
 					if (slice[i] != detail::SlotUnused)
 						++slice[i];
-					else if (i > x && cur[i].kind == detail::CellKind::empty)
+					else if (i > x && cur[i].isEmpty())
 						break;
 				}
 
@@ -238,12 +253,12 @@ namespace ascg::detail {
 				size_t current = detail::SlotUnused;
 				if (leftwards) for (size_t i = x + 1; i > 0; --i) {
 					std::swap(current, slice[i - 1]);
-					if (current == detail::SlotUnused && i <= x && cur[i - 1].kind == detail::CellKind::empty)
+					if (current == detail::SlotUnused && i <= x && cur[i - 1].isEmpty())
 						break;
 				}
 				else for (size_t i = x; i < cur.size(); ++i) {
 					std::swap(current, slice[i]);
-					if (current == detail::SlotUnused && i > x && cur[i].kind == detail::CellKind::empty)
+					if (current == detail::SlotUnused && i > x && cur[i].isEmpty())
 						break;
 				}
 
@@ -257,12 +272,12 @@ namespace ascg::detail {
 			detail::Cell temp{};
 			if (leftwards) for (size_t i = x + 1; i > 0; --i) {
 				std::swap(temp, row[i - 1]);
-				if (temp.kind == detail::CellKind::empty)
+				if (temp.isEmpty())
 					break;
 			}
 			else for (size_t i = x; i < row.size(); ++i) {
 				std::swap(temp, row[i]);
-				if (temp.kind == detail::CellKind::empty)
+				if (temp.isEmpty())
 					break;
 			}
 			return{ x, y };
@@ -585,9 +600,9 @@ namespace ascg::detail {
 			else while (pGrid[--yOther][xOther].lineVertical());
 
 			/* find the end of the next horizontal axis walking towards the original horizontal position */
-			bool endIsNode = (pGrid[yOther][xOther].kind == detail::CellKind::node);
+			bool endIsNode = pGrid[yOther][xOther].isNode();
 			xEnd = xOther;
-			if (endIsNode) for (size_t i = xEnd; pGrid[yOther][i].kind == detail::CellKind::node && xEnd != x; i = detail::Towards(i, x))
+			if (endIsNode) for (size_t i = xEnd; pGrid[yOther][i].isNode() && xEnd != x; i = detail::Towards(i, x))
 				xEnd = i;
 			else if (pGrid[yOther][xOther].kind != cell.kind) {
 				size_t limit = (xOther < x ? pGrid[y].size() : 0);
@@ -609,7 +624,7 @@ namespace ascg::detail {
 				/* check if the own edge is free and if the other corner is free */
 				bool valid = (target == x || pGrid[y][target].kind == detail::CellKind::horizontal);
 				if (valid && !endIsNode && !detail::Inbetween(target, xOther, xEnd))
-					valid = (pGrid[yOther][target].kind == detail::CellKind::empty);
+					valid = pGrid[yOther][target].isEmpty();
 
 				/* check the vertical axis from the primary corner to the height of the other corner */
 				if (valid) for (size_t i : detail::MinMaxWalk{ y, yOther, true }) {
@@ -750,12 +765,12 @@ namespace ascg::detail {
 				y = detail::Towards(y, last);
 
 				/* check if the connection is blocked to the checked side */
-				if (leftwards) for (size_t i = x; i > 0 && row[i - 1].kind != detail::CellKind::empty; --i) {
-					if (row[i - 1].kind == detail::CellKind::node)
+				if (leftwards) for (size_t i = x; i > 0 && !row[i - 1].isEmpty(); --i) {
+					if (row[i - 1].isNode())
 						return ShiftScore::addShift;
 				}
-				else for (size_t i = x + 1; i < row.size() && row[i].kind != detail::CellKind::empty; ++i) {
-					if (row[i].kind == detail::CellKind::node)
+				else for (size_t i = x + 1; i < row.size() && !row[i].isEmpty(); ++i) {
+					if (row[i].isNode())
 						return ShiftScore::addShift;
 				}
 			}
@@ -794,9 +809,9 @@ namespace ascg::detail {
 				/* check if the width of the row needs to be determined (to find its center) */
 				size_t halfRow = row.size();
 				if (align == Alignment::outwards) {
-					while (halfRow > 0 && row[halfRow - 1].kind == detail::CellKind::empty)
+					while (halfRow > 0 && row[halfRow - 1].isEmpty())
 						--halfRow;
-					if (halfRow > 0) for (size_t i = 0; row[i].kind == detail::CellKind::empty; ++i)
+					if (halfRow > 0) for (size_t i = 0; row[i].isEmpty(); ++i)
 						--halfRow;
 					halfRow /= 2;
 				}
@@ -815,7 +830,7 @@ namespace ascg::detail {
 					size_t xOther = x, yOther = y, xEnd = 0, target = 0;
 					if (!fMapIndentCorner(x, y, xOther, yOther, xEnd, target) || target == xOther)
 						continue;
-					bool endIsNode = (pGrid[yOther][xOther].kind == detail::CellKind::node);
+					bool endIsNode = pGrid[yOther][xOther].isNode();
 
 					/* check if this is an outwards movement and the other side sits on the other side of
 					*	the center, in which case the move needs to be skipped to prevent oscillations */
@@ -869,14 +884,14 @@ namespace ascg::detail {
 					size_t xOther = x, yOther = y, xEnd = 0, target = 0;
 					if (!fMapIndentCorner(x, y, xOther, yOther, xEnd, target) || target != xOther)
 						continue;
-					bool endIsNode = (pGrid[yOther][xOther].kind == detail::CellKind::node);
+					bool endIsNode = pGrid[yOther][xOther].isNode();
 
 					/* check if there are any nodes in the way, in which case the interlocking
 					*	cannot be removed and otherwise look for the first and last blocking corner */
 					size_t xCorner = detail::Towards(xOther, x), yFirstCorner = y, yLastCorner = y;
 					bool blockedTransition = false;
 					for (size_t i : detail::MinMaxWalk{ y, yOther, true }) {
-						if (pGrid[i][xCorner].kind == detail::CellKind::node) {
+						if (pGrid[i][xCorner].isNode()) {
 							blockedTransition = true;
 							break;
 						}
@@ -893,7 +908,7 @@ namespace ascg::detail {
 					*	entire range of the original transition (might result in reduction of crossings) */
 					if (yFirstCorner == y) {
 						/* check if both end in the same node, in which case the transitions can be swapped */
-						if (pGrid[yOther][xCorner].kind == detail::CellKind::node && pGrid[yOther][xOther].kind == detail::CellKind::node) {
+						if (pGrid[yOther][xCorner].isNode() && pGrid[yOther][xOther].isNode()) {
 							fInsertDualSwap(y, yOther, xOther, xCorner);
 							return true;
 						}
@@ -951,27 +966,27 @@ namespace ascg::detail {
 			for (size_t y = 0; y < pGrid.size(); ++y) {
 				detail::Row& row = pGrid[y];
 
-				if (checked.contains({ hash, y }))
-					continue;
+				//				if (checked.contains({ hash, y }))
+				//					continue;
 
-				/* check if the row contains a node */
+								/* check if the row contains a node */
 				size_t first = std::ranges::find(row, detail::CellKind::node, &detail::Cell::kind) - row.begin(), last = 0;
 				if (first >= row.size())
 					continue;
 
 				/* count the preferences of all transitions going out of the node and find the end of the current node */
 				intptr_t leftScore = 0, rightScore = 0;
-				for (size_t i = first; (i < row.size() && row[i].kind == detail::CellKind::node); ++i) {
+				for (size_t i = first; (i < row.size() && row[i].isNode()); ++i) {
 					last = i;
 					leftScore += fShiftCheckPreference(y, i, false, true) + fShiftCheckPreference(y, i, true, true);
 					rightScore += fShiftCheckPreference(y, i, false, false) + fShiftCheckPreference(y, i, true, false);
 				}
 
-				/* check if the neighboring spot is not empty, which will add to the penalty */
-				for (size_t i = first; i > 0 && row[i - 1].kind != detail::CellKind::empty; --i)
-					leftScore -= 2;
-				for (size_t i = last + 1; i < row.size() && row[i].kind != detail::CellKind::empty; ++i)
-					rightScore -= 2;
+				/* check if the neihbor spots are empty and otherwise skip the shift */
+				if (first > 0 && !row[first - 1].isEmpty())
+					leftScore = -1;
+				if (last + 1 < row.size() && !row[last + 1].isEmpty())
+					rightScore = -1;
 
 				/* check if any of the scores is better than the current best score */
 				if (leftScore > bestScore)
@@ -992,14 +1007,12 @@ namespace ascg::detail {
 
 	private:
 		void fShrinkHorizontal() const {
-			if (pGrid.empty())
-				return;
 			std::vector<bool> empty(pGrid[0].size(), true);
 
 			/* iterate over all cells and mark all non-removable columns as not empty */
 			for (size_t y = 0; y < pGrid.size(); ++y) {
 				for (size_t x = 0; x < pGrid[y].size(); ++x) {
-					if (pGrid[y][x].kind != detail::CellKind::empty && pGrid[y][x].kind != detail::CellKind::horizontal)
+					if (!pGrid[y][x].simpleHorizontal())
 						empty[x] = false;
 				}
 			}
@@ -1031,9 +1044,9 @@ namespace ascg::detail {
 
 				/* check if the current row either is a node or fully removable */
 				for (const detail::Cell& cell : pGrid[i]) {
-					if (cell.kind != detail::CellKind::empty && cell.kind != detail::CellKind::vertical)
+					if (!cell.simpleVertical())
 						removable = false;
-					if (cell.kind == detail::CellKind::node)
+					if (cell.isNode())
 						node = true;
 				}
 
@@ -1059,6 +1072,131 @@ namespace ascg::detail {
 			/* check if the actual grid can be reduced */
 			if (sizeReduced < pGrid.size())
 				pGrid.erase(pGrid.begin() + sizeReduced, pGrid.end());
+		}
+		bool fTestDisconnection(size_t x, size_t y) const {
+			/* check if the column and the right neighbor are disconnected on the given row */
+			return (!pGrid[y][x].anyRight() && (!pGrid[y][x].isNode() || !pGrid[y][x + 1].isNode()));
+		}
+		std::pair<bool, size_t> fTestReductionSlot(std::vector<size_t>& strand, size_t x) const {
+			/* check if the cell itself is necessary and cannot be removed */
+			size_t y = strand[x];
+			if (!pGrid[y][x].simpleVertical())
+				return{ false, x };
+			if (y > 0 && y + 1 < pGrid.size() && pGrid[y - 1][x].isNode() && pGrid[y + 1][x].isNode())
+				return{ false, x };
+
+			/* check if there exists any node conflicts within the reduction zone (i.e.
+			*	reducing the column here would move two nodes into the same row) */
+			for (size_t _x = x; _x > 0; --_x) {
+				size_t o = strand[_x - 1];
+
+				/* check if the current reduction is before the previous reduction, in which case any nodes on this
+				*	column between the two reductions must not fall onto a row, in which there already is a node */
+				if (y < o) for (size_t _y = y; _y < o; ++_y) {
+					if (pGrid[_y][_x - 1].isNode() && pGrid[_y + 1][x].isNode())
+						return{ false, x };
+				}
+
+				/* check if its the other way around */
+				else if (y > o) for (size_t _y = o; _y < y; ++_y) {
+					if (pGrid[_y + 1][_x - 1].isNode() && pGrid[_y][x].isNode())
+						return{ false, _x - 1 };
+				}
+			}
+			return{ true, 0 };
+		}
+		bool fFindRemovableStrand(std::vector<size_t>& strand) const {
+			std::vector<std::pair<size_t, size_t>> ranges(pGrid[0].size() - 1, std::pair<size_t, size_t>{});
+			bool endReached = false;
+
+			/* iterate over the entire width and find all overlapping disconnected
+			*	ranges and check if a reducible strand can be layed into it */
+			for (size_t x = 0;;) {
+				size_t prevEnd = (x == 0 ? pGrid.size() : ranges[x - 1].second);
+
+				/* check if this is a re-visit due to no valid range being found in the upcoming
+				*	neighbor in which case the previous range can just be used to continue */
+				size_t begin = 0;
+				if (endReached)
+					begin = ranges[x].second;
+
+				/* find the beginning of the non-overlapping range to the neighbor */
+				else {
+					begin = (x == 0 ? 0 : ranges[x - 1].first);
+					if (fTestDisconnection(x, begin)) while (begin > 0 && fTestDisconnection(x, begin - 1))
+						--begin;
+				}
+
+				/* skip any intermediate connections */
+				while (begin < prevEnd && !fTestDisconnection(x, begin))
+					++begin;
+
+				/* check if the end has been reached, in which case the index needs to
+				*	be reverted and the next range of the previous neighbor checked */
+				if (endReached = (begin >= prevEnd)) {
+					if (x == 0)
+						return false;
+					--x;
+					continue;
+				}
+
+				/* find the end of the current range and set it up */
+				size_t end = begin + 1;
+				while (end < pGrid.size() && fTestDisconnection(x, end))
+					++end;
+				ranges[x] = { begin, end };
+
+				/* visit the next neighbor */
+				if (++x < ranges.size())
+					continue;
+
+				/* setup the current strand */
+				for (size_t i = 0; i < strand.size(); ++i)
+					strand[i] = std::max<size_t>((i == 0 ? 0 : ranges[i - 1].first), (i >= ranges.size() ? 0 : ranges[i].first));
+
+				/* iterate over the strand and push it down until a valid combination has been found */
+				x = 0;
+				while (x < strand.size()) {
+					/* check if the given strand position is valid */
+					const auto [valid, badIndex] = fTestReductionSlot(strand, x);
+					x = (valid ? x + 1 : badIndex);
+					if (valid)
+						continue;
+
+					/* check if the strand still remains valid and otherwise update x to point to the failed range */
+					size_t rPrev = (x == 0 ? pGrid.size() : ranges[x - 1].second), rNext = (x >= ranges.size() ? pGrid.size() : ranges[x].second);
+					if (++strand[x] < std::min<size_t>(rPrev, rNext))
+						continue;
+					if (rPrev < rNext || x >= ranges.size())
+						--x;
+					break;
+				}
+
+				/* check if the entire strand has been validated and is therefore reducible
+				*	and otherwise reset the ranges index to skip the failed range */
+				if (x == strand.size())
+					return true;
+				endReached = true;
+			}
+		}
+		void fCompressVertical() const {
+			std::vector<size_t> reduction(pGrid[0].size(), 0);
+
+			/* find all possible reduction strands and remove them from the grid */
+			while (fFindRemovableStrand(reduction)) {
+				/* find the last row, which will be the removed row */
+				size_t drop = 0;
+				for (size_t row : reduction)
+					drop = std::max<size_t>(drop, row);
+
+				/* remove the corresponding column in each row and shift it down
+				*	until the row to be dropped and remove the row itself */
+				for (size_t x = 0; x < reduction.size(); ++x) {
+					for (size_t i = reduction[x]; i < drop; ++i)
+						pGrid[i][x] = pGrid[i + 1][x];
+				}
+				pGrid.erase(pGrid.begin() + drop);
+			}
 		}
 
 	public:
@@ -1095,15 +1233,26 @@ namespace ascg::detail {
 				detail::PrintGrid(pGrid);
 				int k = 0;
 
-				while (fShiftNodes(true, i / 3)) {
+
+				// Idea A:
+				// try: 'wiggle' the pieces into place; my moving single nodes until it improves the state
+				// move one, which has at least some interest in being moved, reduce, measure;
+				//	if smaller: reset state to new graph
+				//	otherwise:
+				//		add to map of performed moves
+				//		if larger: reset to previous state
+
+				// Idea B:
+				// 'wiggle' all directly movable into place (i.e. the one's without side-effects)
+				// for all others, check if there is a logic to measure how much transitions are interested in it moving?
+
+				// Idea C:
+				// find a graph of horizontals through the graph, and shift by it
+
+				if (fShiftNodes(0)) {
 					straightenGraph();
 					detail::PrintGrid(pGrid);
-					int k = 0;
-				}
-				while (fShiftNodes(false, i / 3)) {
-					straightenGraph();
-					detail::PrintGrid(pGrid);
-					int k = 0;
+					--i;
 				}
 			}
 
@@ -1151,7 +1300,8 @@ namespace ascg::detail {
 			}
 
 			detail::PrintGrid(pGrid);
-
+			fCompressVertical();
+			detail::PrintGrid(pGrid);
 
 			std::vector<detail::Row> grid;
 			std::swap(pGrid, grid);
