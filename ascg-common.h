@@ -19,6 +19,8 @@
 *	add self-loops?/double-edges?/directions?
 *	finish layer-builder (cleanup)
 *
+*	add bounds (like: max node-shifting iterations/max...) to conditionally ensure algorithm limits
+* 
 *	finish grid-builder: Node shifting
 *
 *	only shift nodes with highest score

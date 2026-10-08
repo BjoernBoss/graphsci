@@ -125,6 +125,17 @@ namespace ascg::detail {
 			rightwards,
 			outwards
 		};
+		struct GridScore {
+			size_t dimensions = 0;
+			size_t corners = 0;
+			int8_t compare(const GridScore& other) const {
+				if (dimensions != other.dimensions)
+					return (dimensions < other.dimensions ? 1 : -1);
+				if (corners != other.corners)
+					return (corners < other.corners ? 1 : -1);
+				return 0;
+			}
+		};
 
 	private:
 		const std::vector<detail::Layer>& pLayers;
@@ -824,7 +835,7 @@ namespace ascg::detail {
 
 					/* check if there are any nodes in the way, in which case the interlocking
 					*	cannot be removed and otherwise look for the first and last blocking corner */
-					size_t xCorner = detail::Towards(xOther, x), yFirstCorner = y, yLastCorner = y;
+					size_t xCorner = detail::Towards(xOther, x), yFirstCorner = pGrid.size(), yLastCorner = pGrid.size();
 					bool blockedTransition = false;
 					for (size_t i : detail::MinMaxWalk{ y, yOther, true }) {
 						if (pGrid[i][xCorner].isNode()) {
@@ -833,7 +844,7 @@ namespace ascg::detail {
 						}
 						if (!pGrid[i][xCorner].anyCorner())
 							continue;
-						if (yFirstCorner == y)
+						if (yFirstCorner == pGrid.size())
 							yFirstCorner = i;
 						yLastCorner = i;
 					}
@@ -842,7 +853,7 @@ namespace ascg::detail {
 
 					/* check if no corner has been found, which can only be the case if the blocker spans the
 					*	entire range of the original transition (might result in reduction of crossings) */
-					if (yFirstCorner == y) {
+					if (yFirstCorner == pGrid.size()) {
 						/* check if both end in the same node, in which case the transitions can be swapped */
 						if (pGrid[yOther][xCorner].isNode() && pGrid[yOther][xOther].isNode()) {
 							fInsertDualSwap(y, yOther, xOther, xCorner);
@@ -865,150 +876,28 @@ namespace ascg::detail {
 					*	transition (i.e. blocking each other or only one blocked by the other) */
 					bool firstDualBlock = (leftwards ? pGrid[yFirstCorner][xCorner].cornerRight() : pGrid[yFirstCorner][xCorner].cornerLeft());
 					bool lastDualBlock = (leftwards ? pGrid[yLastCorner][xCorner].cornerRight() : pGrid[yLastCorner][xCorner].cornerLeft());
+					bool multiple = (yFirstCorner != yLastCorner);
 
 					/* check if a corner points into the blocked transition (i.e. they block each other;
 					*	only resolve one corner, as it will alter the graph and invalidate the indices) */
 					if (firstDualBlock) {
-						detail::PrintGrid(pGrid);
 						fInsertDualCornerBlock(xCorner, yFirstCorner, leftwards);
-						detail::PrintGrid(pGrid);
 						return true;
 					}
-					if (lastDualBlock && yFirstCorner != yLastCorner) {
-						detail::PrintGrid(pGrid);
+					if (lastDualBlock && multiple) {
 						fInsertDualCornerBlock(xCorner, yLastCorner, leftwards);
-						detail::PrintGrid(pGrid);
 						return true;
 					}
 
 					/* check if either one of the two blocking corners can be rotated outside of the current transition */
-					if (xCorner != x && fInsertSingleCornerBlock(xOther, y, xCorner, yFirstCorner))
+					size_t baseCorner = (y < yOther ? yFirstCorner : yLastCorner), otherCorner = (y < yOther ? yLastCorner : yFirstCorner);
+					if (detail::Inbetween(xCorner, x, xOther) && xCorner != x && fInsertSingleCornerBlock(xOther, y, xCorner, baseCorner))
 						return true;
-					if (xCorner != xEnd && yFirstCorner != yLastCorner && fInsertSingleCornerBlock(xOther, y, xCorner, yLastCorner))
+					if (multiple && detail::Inbetween(xCorner, xOther, xEnd) && xCorner != xEnd && fInsertSingleCornerBlock(xOther, yOther, xCorner, otherCorner))
 						return true;
 				}
 			}
 			return false;
-		}
-
-	private:
-		intptr_t fShiftCheckPreference(size_t y, size_t x, bool forwards, bool leftwards) const {
-			enum ShiftScore : intptr_t {
-				extendShort = -2,
-				addShift = -2,
-				extendShift = -1,
-				uncertain = 0,
-				nothing = 0,
-				reduceShift = 1,
-				dropShift = 3
-			};
-
-			/* check if the transition actually exists and points towards the node */
-			size_t last = (forwards ? pGrid.size() - 1 : 0);
-			if (y == last)
-				return ShiftScore::nothing;
-			y = detail::Towards(y, last);
-			if (forwards ? !pGrid[y][x].anyTop() : !pGrid[y][x].anyBottom())
-				return ShiftScore::nothing;
-
-			/* follow the strand until the first shift to the left or right is
-			*	encountered or until the connection is considered blocked */
-			while (pGrid[y][x].lineVertical()) {
-				detail::Row& row = pGrid[y];
-				y = detail::Towards(y, last);
-
-				/* check if the connection is blocked to the checked side */
-				if (leftwards) for (size_t i = x; i > 0 && !row[i - 1].isEmpty(); --i) {
-					if (row[i - 1].isNode())
-						return ShiftScore::addShift;
-				}
-				else for (size_t i = x + 1; i < row.size() && !row[i].isEmpty(); ++i) {
-					if (row[i].isNode())
-						return ShiftScore::addShift;
-				}
-			}
-
-			/* evaluate the final pull direction */
-			if (pGrid[y][x].cornerLeft()) {
-				bool single = pGrid[y][x - 1].cornerRight();
-				if (!leftwards)
-					return (single ? ShiftScore::extendShort : ShiftScore::extendShift);
-				return (single ? ShiftScore::dropShift : ShiftScore::reduceShift);
-			}
-			if (pGrid[y][x].cornerRight()) {
-				bool single = pGrid[y][x + 1].cornerLeft();
-				if (leftwards)
-					return (single ? ShiftScore::extendShort : ShiftScore::extendShift);
-				return (single ? ShiftScore::dropShift : ShiftScore::reduceShift);
-			}
-
-			/* the final position must be ending in a node,
-			*	check if there is space in the given direction */
-			const detail::Row& prev = pGrid[forwards ? y - 1 : y + 1];
-			if (leftwards ? x == 0 : x + 1 == prev.size())
-				return ShiftScore::nothing;
-			const detail::Cell& neighbor = prev[leftwards ? x - 1 : x + 1];
-			if (forwards ? neighbor.anyBottom() : neighbor.anyTop())
-				return ShiftScore::addShift;
-			return ShiftScore::nothing;
-		}
-		uint64_t fMeasureHash() const {
-			uint64_t hash = detail::HashInit;
-			for (const detail::Row& row : pGrid) {
-				for (const detail::Cell& cell : row)
-					hash = detail::HashJoin(hash, cell.kind);
-			}
-			return hash;
-		}
-		bool fShiftNodes(size_t complexity) const {
-			intptr_t bestScore = -1, bestRow = 0, bestEmpty = 0;
-			bool bestLeftwards = false;
-
-			static std::set<std::pair<uint64_t, size_t>> checked;
-			uint64_t hash = fMeasureHash();
-
-			/* find the next node and check if it should be shifted (iterate until one has been found or all have been checked;
-			*	Important: two rows back-to-back must not both contain nodes, there must always exist an intermediate row) */
-			for (size_t y = 0; y < pGrid.size(); ++y) {
-				detail::Row& row = pGrid[y];
-
-				//				if (checked.contains({ hash, y }))
-				//					continue;
-
-								/* check if the row contains a node */
-				size_t first = std::ranges::find(row, detail::CellKind::node, &detail::Cell::kind) - row.begin(), last = 0;
-				if (first >= row.size())
-					continue;
-
-				/* count the preferences of all transitions going out of the node and find the end of the current node */
-				intptr_t leftScore = 0, rightScore = 0;
-				for (size_t i = first; (i < row.size() && row[i].isNode()); ++i) {
-					last = i;
-					leftScore += fShiftCheckPreference(y, i, false, true) + fShiftCheckPreference(y, i, true, true);
-					rightScore += fShiftCheckPreference(y, i, false, false) + fShiftCheckPreference(y, i, true, false);
-				}
-
-				/* check if the neihbor spots are empty and otherwise skip the shift */
-				if (first > 0 && !row[first - 1].isEmpty())
-					leftScore = -1;
-				if (last + 1 < row.size() && !row[last + 1].isEmpty())
-					rightScore = -1;
-
-				/* check if any of the scores is better than the current best score */
-				if (leftScore > bestScore)
-					bestScore = leftScore, bestRow = y, bestEmpty = last, bestLeftwards = true;
-				if (rightScore > bestScore)
-					bestScore = rightScore, bestRow = y, bestEmpty = first, bestLeftwards = false;
-			}
-
-			/* check if a best match has been found to be applied */
-			if (bestScore <= static_cast<intptr_t>(complexity))
-				return false;
-
-			/* move the node over by ensuring that the spot next to it becomes empty */
-			checked.insert({ hash, bestRow });
-			fCreateEmptyCell(bestEmpty, bestRow, bestLeftwards);
-			return true;
 		}
 
 	private:
@@ -1206,6 +1095,117 @@ namespace ascg::detail {
 		}
 
 	private:
+		int8_t fCheckShiftPreference(size_t x, size_t y, bool forwards) const {
+			size_t last = (forwards ? pGrid.size() - 1 : 0);
+
+			/* check if the transition actually exists and points towards the node */
+			if (y == last)
+				return 0;
+			y = detail::Towards(y, last);
+			if (forwards ? !pGrid[y][x].anyTop() : !pGrid[y][x].anyBottom())
+				return 0;
+
+			/* follow the strand until the first corner or other end-block is reached */
+			while (pGrid[y][x].lineVertical()) {
+				detail::Row& row = pGrid[y];
+				y = detail::Towards(y, last);
+			}
+
+			/* evaluate the final pull direction */
+			if (pGrid[y][x].cornerLeft())
+				return -1;
+			if (pGrid[y][x].cornerRight())
+				return 1;
+			return 0;
+		}
+		bool fShiftNode(std::map<std::pair<size_t, size_t>, intptr_t>& open, std::set<std::pair<size_t, size_t>>& closed) const {
+			/* iterate over the nodes and find all nodes, which can potentially be moved and select one to be shifted */
+			for (size_t y = 0; y < pGrid.size(); ++y) {
+				detail::Row& row = pGrid[y];
+
+				/* check if the row contains a node */
+				size_t first = std::ranges::find(row, detail::CellKind::node, &detail::Cell::kind) - row.begin(), last = 0;
+				if (first >= row.size())
+					continue;
+				for (size_t i = first; i < row.size() && row[i].isNode(); ++i)
+					last = i;
+
+				/* check if the left or right direction can potentially be pursued and is not already queued for it */
+				bool leftCheck = (first > 0 && row[first - 1].isEmpty() && !closed.contains({ y, first - 1 }) && !open.contains({ y, first - 1 }));
+				bool rightCheck = (last + 1 < row.size() && row[last + 1].isEmpty() && !closed.contains({ y, first + 1 }) && !open.contains({ y, first + 1 }));
+				if (!leftCheck && !rightCheck)
+					continue;
+
+				/* count the number of of potentially benefitting connections in each direction */
+				intptr_t leftScore = 0, rightScore = 0;
+				for (size_t i = first; i <= last; ++i) {
+					if (int8_t shift = fCheckShiftPreference(i, y, true); shift != 0)
+						++(shift < 0 ? leftScore : rightScore);
+					if (int8_t shift = fCheckShiftPreference(i, y, false); shift != 0)
+						++(shift < 0 ? leftScore : rightScore);
+				}
+
+				/* insert the potential moves into the open set */
+				if (leftCheck && leftScore > 0)
+					open.insert({ { y, first - 1 }, leftScore - rightScore });
+				if (rightCheck && rightScore > 0)
+					open.insert({ { y, first + 1 }, rightScore - leftScore });
+			}
+
+			/* find the next entry in the open list to apply */
+			auto it = open.begin(), best = open.end();
+			size_t bestDistance = 0, bestEmpty = 0;
+			bool bestLeftwards = false;
+			while (it != open.end()) {
+				/* check if the entry has already been visited */
+				if (closed.contains(it->first)) {
+					it = open.erase(it);
+					continue;
+				}
+
+				/* check if the node position has already been reached */
+				detail::Row& row = pGrid[it->first.first];
+				size_t first = std::ranges::find(row, detail::CellKind::node, &detail::Cell::kind) - row.begin(), last = 0;
+				for (size_t i = first; i < row.size() && row[i].isNode(); ++i)
+					last = i;
+				if (it->first.second == first) {
+					it = open.erase(it);
+					continue;
+				}
+				bool leftwards = (it->first.second < first);
+
+				/* check if the movement is still possible or if the move is blocked and if the entry is better than the current best option */
+				if ((leftwards ? row[first - 1] : row[last + 1]).isEmpty()) {
+					size_t distance = (leftwards ? first - it->first.second : it->first.second - first);
+					if (best == open.end() || bestDistance > distance || best->second < it->second)
+						best = it, bestDistance = distance, bestEmpty = (leftwards ? last : first), bestLeftwards = leftwards;
+				}
+				++it;
+			}
+
+			/* check if no next move has been found in which case the end has been reached */
+			if (best == open.end())
+				return false;
+
+			/* move the node over by ensuring that the spot next to it becomes empty and update the sets */
+			fCreateEmptyCell(bestEmpty, best->first.first, bestLeftwards);
+			detail::PrintGrid(pGrid);
+			closed.insert(best->first);
+			open.erase(best);
+			return true;
+		}
+		GridScore fMeasureGrid(const std::vector<detail::Row>& grid) const {
+			GridScore score{ .dimensions = grid.size() + grid[0].size(), .corners = 0 };
+
+			/* count the number of corners in the grid */
+			for (const detail::Row& row : grid) {
+				for (const detail::Cell& cell : row)
+					score.corners += (cell.anyCorner() ? 1 : 0);
+			}
+			return score;
+		}
+
+	private:
 		void fBuildStraighten() const {
 			/* first straighten across the graph and then finally outwards
 			*	and shrink the graph to remove unnecessary rows and columns */
@@ -1222,8 +1222,15 @@ namespace ascg::detail {
 				bool leftwards = (i % 2 == 0);
 
 				/* fix all interlocks into the given direction and propagate any changes out of the graph */
-				while (fFixInterlocks(leftwards))
-					while (fStraightenGraph(leftwards ? Alignment::leftwards : Alignment::rightwards));
+				while (fFixInterlocks(leftwards)) {
+					detail::PrintGrid(pGrid);
+					while (fStraightenGraph(leftwards ? Alignment::leftwards : Alignment::rightwards))
+						detail::PrintGrid(pGrid);
+
+					/* perform an intermediate vertical shrinking to remove
+					*	temporary shift rows introduced by the interlock fixing */
+					fShrinkVertical();
+				}
 			}
 
 			/* straighten the final graph one final complete time (automatically shrinks) */
@@ -1240,32 +1247,29 @@ namespace ascg::detail {
 			fBuildStraighten();
 			detail::PrintGrid(pGrid);
 
-			for (size_t i = 0; i < 2; ++i) {
+			/* setup the currently best grid version (to be able to recover to it in case of worse visited graphs) */
+			std::vector<detail::Row> bestGrid = pGrid;
+			GridScore bestScore = fMeasureGrid(bestGrid);
+
+			/* iterate until no more nodes need to be shifted */
+			std::map<std::pair<size_t, size_t>, intptr_t> nodeOpen;
+			std::set<std::pair<size_t, size_t>> nodeClosed;
+			while (true) {
+				/* fix any encountered interlocks (will automatically straighten the graph) */
 				fBuildFixInterlocks();
-				detail::PrintGrid(pGrid);
-				int k = 0;
 
+				/* check if a new best graph has been encountered or restore the last best grid */
+				GridScore score = fMeasureGrid(pGrid);
+				if (int8_t cmp = score.compare(bestScore); cmp > 0)
+					bestGrid = pGrid, bestScore = score, nodeOpen.clear(), nodeClosed.clear();
+				else if (cmp < 0)
+					pGrid = bestGrid;
 
-				// Idea A:
-				// try: 'wiggle' the pieces into place; my moving single nodes until it improves the state
-				// move one, which has at least some interest in being moved, reduce, measure;
-				//	if smaller: reset state to new graph
-				//	otherwise:
-				//		add to map of performed moves
-				//		if larger: reset to previous state
-
-				// Idea B:
-				// 'wiggle' all directly movable into place (i.e. the one's without side-effects)
-				// for all others, check if there is a logic to measure how much transitions are interested in it moving?
-
-				// Idea C:
-				// find a graph of horizontals through the graph, and shift by it
-
-				if (fShiftNodes(0)) {
-					fBuildStraighten();
-					detail::PrintGrid(pGrid);
-					--i;
-				}
+				/* try to shift another node into a better place, in which
+				*	case the straightening and measuring can be repeated */
+				if (!fShiftNode(nodeOpen, nodeClosed))
+					break;
+				fBuildStraighten();
 			}
 
 			/* perform the final full compression (will already be shrunk in both directions; compression on the
