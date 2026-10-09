@@ -38,9 +38,9 @@ namespace ascg {
 			if (b < ascg::NoNode)
 				pRanges.push_back(detail::Range{ .first = a, .last = b });
 		}
-		ascg::Graph finalize() const {
+		ascg::Graph finalize(std::optional<size_t> gridBound = std::nullopt) const {
 			std::vector<detail::Layer> layers = detail::LayerBuilder{ pRanges }.build();
-			std::vector<detail::Row> grid = detail::GridBuilder{ layers }.build();
+			std::vector<detail::Row> grid = detail::GridBuilder{ layers }.build(gridBound);
 			auto [rows, map] = detail::Renderer{ layers, grid }.draw(ascg::NoNode);
 			return ascg::Graph{ .rows = std::move(rows), .map = std::move(map) };
 		}

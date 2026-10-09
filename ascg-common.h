@@ -17,19 +17,14 @@
 /*
 *	cleanup in includes
 *	add self-loops?/double-edges?/directions?
+*
 *	finish layer-builder (cleanup)
-*
-*	add bounds (like: max node-shifting iterations/max...) to conditionally ensure algorithm limits
-* 
-*	finish grid-builder: Node shifting
-*
-*	only shift nodes with highest score
 *	update detail::LayoutGraph to default offset preferred positions to be centered
 *
-*	shrink horizontally
-*	shrink vertically
-*	straighten up any lines
+*	add bounds (like: max node-shifting iterations/max...) to conditionally ensure algorithm limits
 *
+*
+*	finish grid-builder (node shifting)
 *	grid creation: dont account for number of crossings anymore for minimum size?
 *
 */
@@ -44,18 +39,6 @@ namespace ascg::detail {
 		std::vector<detail::Layer> layers(grid.size());
 		for (const std::string& line : detail::Renderer{ layers, grid }.draw(0).first)
 			str::PrintLn('[', line, ']');
-	}
-
-	/* use FNV-1a hashing to hash the point order (to simplify the algorihm, states are no
-	*	identified by identical graph state, but rather by identical hash and edge count) */
-	static constexpr uint64_t HashInit = 0xcbf29ce484222325;
-	uint64_t HashJoin(uint64_t hash, auto value) {
-		uint64_t _value = static_cast<uint64_t>(value);
-		for (size_t i = 0; i < sizeof(value); ++i) {
-			hash = (hash ^ static_cast<uint8_t>(_value)) * 0x00000100000001b3;
-			_value >>= 8;
-		}
-		return hash;
 	}
 }
 
@@ -89,6 +72,8 @@ namespace ascg::detail {
 		Iterator end() const { return Iterator{ last + 1 }; };
 	};
 	inline size_t Towards(size_t value, size_t other, size_t step = 1) {
+		if (value == other)
+			return value;
 		return (value < other ? value + step : value - step);
 	}
 	inline bool Inbetween(size_t value, size_t a, size_t b) {

@@ -126,14 +126,26 @@ namespace ascg::detail {
 			outwards
 		};
 		struct GridScore {
-			size_t dimensions = 0;
+			size_t height = 0;
+			size_t width = 0;
 			size_t corners = 0;
-			int8_t compare(const GridScore& other) const {
-				if (dimensions != other.dimensions)
-					return (dimensions < other.dimensions ? 1 : -1);
-				if (corners != other.corners)
-					return (corners < other.corners ? 1 : -1);
+			int8_t compare(const GridScore& r) const {
+				if (height != r.height)
+					return (height < r.height ? 1 : -1);
+				if (width != r.width)
+					return (width < r.width ? 1 : -1);
+				if (corners != r.corners)
+					return (corners < r.corners ? 1 : -1);
 				return 0;
+			}
+		};
+		struct NodePoint {
+			size_t index = 0;
+			size_t x = 0;
+			bool operator<(const NodePoint& r) const {
+				if (index != r.index)
+					return (index < r.index);
+				return (x < r.x);
 			}
 		};
 
@@ -611,7 +623,7 @@ namespace ascg::detail {
 			/* find the end of the next horizontal axis walking towards the original horizontal position */
 			bool endIsNode = pGrid[yOther][xOther].isNode();
 			xEnd = xOther;
-			if (endIsNode) for (size_t i = xEnd; pGrid[yOther][i].isNode() && xEnd != x; i = detail::Towards(i, x))
+			if (endIsNode) for (size_t i = xEnd; xEnd != x && pGrid[yOther][i].isNode(); i = detail::Towards(i, x))
 				xEnd = i;
 			else if (pGrid[yOther][xOther].kind != cell.kind) {
 				size_t limit = (xOther < x ? pGrid[y].size() : 0);
@@ -970,7 +982,7 @@ namespace ascg::detail {
 		}
 		bool fTestDisconnection(size_t x, size_t y) const {
 			/* check if the column and the right neighbor are disconnected on the given row */
-			return (!pGrid[y][x].anyRight() && (!pGrid[y][x].isNode() || !pGrid[y][x + 1].isNode()));
+			return (!pGrid[y][x].anyRight() && (!pGrid[y][x].isNode() || x + 1 >= pGrid[y].size() || !pGrid[y][x + 1].isNode()));
 		}
 		std::pair<bool, size_t> fTestReductionSlot(std::vector<size_t>& strand, size_t x) const {
 			/* check if the cell itself is necessary and cannot be removed */
@@ -1075,9 +1087,13 @@ namespace ascg::detail {
 			}
 		}
 		void fCompressVertical() const {
-			std::vector<size_t> reduction(pGrid[0].size(), 0);
+			/* check if the grid is only a strip, in which case the simple shrinking will already
+			*	have been enough (will otherwise lead to edge-cases in the strand search) */
+			if (pGrid[0].size() == 1)
+				return;
 
 			/* find all possible reduction strands and remove them from the grid */
+			std::vector<size_t> reduction(pGrid[0].size(), 0);
 			while (fFindRemovableStrand(reduction)) {
 				/* find the last row, which will be the removed row */
 				size_t drop = 0;
@@ -1118,7 +1134,12 @@ namespace ascg::detail {
 				return 1;
 			return 0;
 		}
-		bool fShiftNode(std::map<std::pair<size_t, size_t>, intptr_t>& open, std::set<std::pair<size_t, size_t>>& closed) const {
+		bool fShiftNode(std::map<NodePoint, intptr_t>& open, std::set<NodePoint>& closed, std::optional<NodePoint>& current) const {
+			/* node placement is identified by its index and first cell position, as for each grid, the
+			*	rows may be slightly shifted, but the overall starting horizontal position can be expected
+			*	to be consistent, as any shifts in it are assumed to also invalidate the grid score */
+			std::vector<size_t> nodeMap;
+
 			/* iterate over the nodes and find all nodes, which can potentially be moved and select one to be shifted */
 			for (size_t y = 0; y < pGrid.size(); ++y) {
 				detail::Row& row = pGrid[y];
@@ -1129,73 +1150,107 @@ namespace ascg::detail {
 					continue;
 				for (size_t i = first; i < row.size() && row[i].isNode(); ++i)
 					last = i;
+				NodePoint leftPoint{ .index = nodeMap.size(), .x = first - 1 }, rightPoint{ .index = nodeMap.size(), .x = first + 1 };
+				nodeMap.push_back(y);
 
 				/* check if the left or right direction can potentially be pursued and is not already queued for it */
-				bool leftCheck = (first > 0 && row[first - 1].isEmpty() && !closed.contains({ y, first - 1 }) && !open.contains({ y, first - 1 }));
-				bool rightCheck = (last + 1 < row.size() && row[last + 1].isEmpty() && !closed.contains({ y, first + 1 }) && !open.contains({ y, first + 1 }));
+				bool leftCheck = (first > 0 && row[first - 1].isEmpty() && !closed.contains(leftPoint) && !open.contains(leftPoint));
+				bool rightCheck = (last + 1 < row.size() && row[last + 1].isEmpty() && !closed.contains(rightPoint) && !open.contains(rightPoint));
 				if (!leftCheck && !rightCheck)
 					continue;
 
 				/* count the number of of potentially benefitting connections in each direction */
-				intptr_t leftScore = 0, rightScore = 0;
+				intptr_t leftScore = 0, rightScore = 0, emptyScore = 0;
 				for (size_t i = first; i <= last; ++i) {
-					if (int8_t shift = fCheckShiftPreference(i, y, true); shift != 0)
+					if (int8_t shift = fCheckShiftPreference(i, y, true); shift == 0)
+						++emptyScore;
+					else
 						++(shift < 0 ? leftScore : rightScore);
-					if (int8_t shift = fCheckShiftPreference(i, y, false); shift != 0)
+
+					if (int8_t shift = fCheckShiftPreference(i, y, false); shift == 0)
+						++emptyScore;
+					else
 						++(shift < 0 ? leftScore : rightScore);
 				}
 
 				/* insert the potential moves into the open set */
 				if (leftCheck && leftScore > 0)
-					open.insert({ { y, first - 1 }, leftScore - rightScore });
+					open.insert({ leftPoint, leftScore - rightScore - emptyScore });
 				if (rightCheck && rightScore > 0)
-					open.insert({ { y, first + 1 }, rightScore - leftScore });
+					open.insert({ rightPoint, rightScore - leftScore - emptyScore });
 			}
 
-			/* find the next entry in the open list to apply */
-			auto it = open.begin(), best = open.end();
-			size_t bestDistance = 0, bestEmpty = 0;
+			/* helper to evaluate a given nodepoint */
+			const auto evaluatePoint = [this, &nodeMap](const NodePoint& pt, size_t& distance, size_t& emptySlot, bool& leftwards) -> int8_t {
+				detail::Row& row = pGrid[nodeMap[pt.index]];
+
+				/* check if the node position has already been reached */
+				size_t first = std::ranges::find(row, detail::CellKind::node, &detail::Cell::kind) - row.begin(), last = 0;
+				if (pt.x == first)
+					return -1;
+				for (size_t i = first; i < row.size() && row[i].isNode(); ++i)
+					last = i;
+
+				/* check if the movement is currently not possible as it is blocked (indices must still be valid
+				*	as only valid-bounded entries are added to the queue and any bound-changes invalidate the lists) */
+				leftwards = (pt.x < first);
+				if (!(leftwards ? row[first - 1] : row[last + 1]).isEmpty())
+					return 0;
+
+				/* compute the points distance to its target and the next spot to mark as empty to move into the given direction */
+				distance = (leftwards ? first - pt.x : pt.x - first);
+				emptySlot = (leftwards ? last : first);
+				return 1;
+			};
+
+			/* check if a previous far away goal still exists and check if its still a
+			*	relevant target, in which case it automatically becomes the best choice) */
+			size_t bestDistance = 0, bestEmptySlot = 0;
 			bool bestLeftwards = false;
-			while (it != open.end()) {
+			auto best = open.end();
+			if (current.has_value()) {
+				if (evaluatePoint(*current, bestDistance, bestEmptySlot, bestLeftwards) > 0)
+					best = open.find(*current);
+				else
+					open.erase(*current);
+			}
+
+			/* if no target to follow exists, find the next entry in the open list to apply */
+			if (best == open.end()) for (auto it = open.begin(); it != open.end();) {
 				/* check if the entry has already been visited */
 				if (closed.contains(it->first)) {
 					it = open.erase(it);
 					continue;
 				}
 
-				/* check if the node position has already been reached */
-				detail::Row& row = pGrid[it->first.first];
-				size_t first = std::ranges::find(row, detail::CellKind::node, &detail::Cell::kind) - row.begin(), last = 0;
-				for (size_t i = first; i < row.size() && row[i].isNode(); ++i)
-					last = i;
-				if (it->first.second == first) {
+				/* evaluate the point and check if the move is better than the current best
+				*	option, as it is closer to the current grid-state or has a better score */
+				size_t distance = 0, emptySlot = 0;
+				bool leftwards = false;
+				if (int8_t state = evaluatePoint(it->first, distance, emptySlot, leftwards); state < 0)
 					it = open.erase(it);
-					continue;
-				}
-				bool leftwards = (it->first.second < first);
-
-				/* check if the movement is still possible or if the move is blocked and if the entry is better than the current best option */
-				if ((leftwards ? row[first - 1] : row[last + 1]).isEmpty()) {
-					size_t distance = (leftwards ? first - it->first.second : it->first.second - first);
-					if (best == open.end() || bestDistance > distance || best->second < it->second)
-						best = it, bestDistance = distance, bestEmpty = (leftwards ? last : first), bestLeftwards = leftwards;
-				}
-				++it;
+				else if (state > 0 && (best == open.end() || bestDistance > distance || best->second < it->second))
+					best = it++, bestDistance = distance, bestEmptySlot = emptySlot, bestLeftwards = leftwards;
+				else
+					++it;
 			}
 
 			/* check if no next move has been found in which case the end has been reached */
+			current = std::nullopt;
 			if (best == open.end())
 				return false;
 
-			/* move the node over by ensuring that the spot next to it becomes empty and update the sets */
-			fCreateEmptyCell(bestEmpty, best->first.first, bestLeftwards);
-			detail::PrintGrid(pGrid);
+			/* move the node over by ensuring that the spot next to it becomes empty and update the iterative state */
+			fCreateEmptyCell(bestEmptySlot, nodeMap[best->first.index], bestLeftwards);
 			closed.insert(best->first);
-			open.erase(best);
+			if (bestDistance == 1)
+				open.erase(best);
+			else
+				current = best->first;
 			return true;
 		}
 		GridScore fMeasureGrid(const std::vector<detail::Row>& grid) const {
-			GridScore score{ .dimensions = grid.size() + grid[0].size(), .corners = 0 };
+			GridScore score{ .height = grid.size(), .width = grid[0].size(), .corners = 0 };
 
 			/* count the number of corners in the grid */
 			for (const detail::Row& row : grid) {
@@ -1223,9 +1278,7 @@ namespace ascg::detail {
 
 				/* fix all interlocks into the given direction and propagate any changes out of the graph */
 				while (fFixInterlocks(leftwards)) {
-					detail::PrintGrid(pGrid);
-					while (fStraightenGraph(leftwards ? Alignment::leftwards : Alignment::rightwards))
-						detail::PrintGrid(pGrid);
+					while (fStraightenGraph(leftwards ? Alignment::leftwards : Alignment::rightwards));
 
 					/* perform an intermediate vertical shrinking to remove
 					*	temporary shift rows introduced by the interlock fixing */
@@ -1238,22 +1291,22 @@ namespace ascg::detail {
 		}
 
 	public:
-		std::vector<detail::Row> build() const {
+		std::vector<detail::Row> build(std::optional<size_t> iterations) const {
 			/* check if the layers are empty, in which case nothing needs to be done, and
 			*	otherwise create the initial grid and straighten it (cannot be empty anymore) */
 			if (pLayers.empty())
 				return {};
 			fConstructGrid();
 			fBuildStraighten();
-			detail::PrintGrid(pGrid);
 
 			/* setup the currently best grid version (to be able to recover to it in case of worse visited graphs) */
 			std::vector<detail::Row> bestGrid = pGrid;
 			GridScore bestScore = fMeasureGrid(bestGrid);
 
-			/* iterate until no more nodes need to be shifted */
-			std::map<std::pair<size_t, size_t>, intptr_t> nodeOpen;
-			std::set<std::pair<size_t, size_t>> nodeClosed;
+			/* iterate until no more nodes need to be shifted or the iterations limit has been reached */
+			std::map<NodePoint, intptr_t> nodeOpen;
+			std::set<NodePoint> nodeClosed;
+			std::optional<NodePoint> nodeCurrent;
 			while (true) {
 				/* fix any encountered interlocks (will automatically straighten the graph) */
 				fBuildFixInterlocks();
@@ -1261,13 +1314,17 @@ namespace ascg::detail {
 				/* check if a new best graph has been encountered or restore the last best grid */
 				GridScore score = fMeasureGrid(pGrid);
 				if (int8_t cmp = score.compare(bestScore); cmp > 0)
-					bestGrid = pGrid, bestScore = score, nodeOpen.clear(), nodeClosed.clear();
+					bestGrid = pGrid, bestScore = score, nodeOpen.clear(), nodeClosed.clear(), nodeCurrent = std::nullopt;
 				else if (cmp < 0)
 					pGrid = bestGrid;
 
+				/* check if another shift can be performed or if the limit has been reached */
+				if (iterations.has_value() && (*iterations)-- == 0)
+					break;
+
 				/* try to shift another node into a better place, in which
 				*	case the straightening and measuring can be repeated */
-				if (!fShiftNode(nodeOpen, nodeClosed))
+				if (!fShiftNode(nodeOpen, nodeClosed, nodeCurrent))
 					break;
 				fBuildStraighten();
 			}
@@ -1276,7 +1333,6 @@ namespace ascg::detail {
 			*	horizontal is not necessary, as the graph straightening operations are developed to essentially
 			*	perform the horizontal compression to the point that the simple shrinkening is enough) */
 			fCompressVertical();
-			detail::PrintGrid(pGrid);
 
 			/* return the complete generated grid */
 			std::vector<detail::Row> grid;
