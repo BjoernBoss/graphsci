@@ -21,12 +21,7 @@
 *	finish layer-builder (cleanup)
 *	update detail::LayoutGraph to default offset preferred positions to be centered
 *
-*	add bounds (like: max node-shifting iterations/max...) to conditionally ensure algorithm limits
-*
-*
-*	finish grid-builder (node shifting)
-*	grid creation: dont account for number of crossings anymore for minimum size?
-*
+*	add bounds (like: max node-shifting iterations/max...) to conditionally ensure algorithm limits*
 */
 #include <ustring/ustring.h>
 

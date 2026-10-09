@@ -413,6 +413,7 @@ namespace ascg::detail {
 		}
 		void fConstructAddCrossing(std::vector<size_t>& slice, size_t index, size_t target) const {
 			detail::Row& row = pGrid.emplace_back();
+			row.reserve(pGrid[0].size());
 			bool leftwards = (target < index);
 
 			/* add the traversals before the crossing */
@@ -533,44 +534,26 @@ namespace ascg::detail {
 			fInsertSliceCorrections(slice, pGrid.size());
 
 			/* ensure that at least one row was added, as otherwise two nodes may directly touch */
-			if (numberOfRows == pGrid.size())
-				fFillTraversals(pGrid.emplace_back(), slice, 0, slice.size());
+			if (numberOfRows == pGrid.size()) {
+				detail::Row& row = pGrid.emplace_back();
+				row.reserve(pGrid[0].size());
+				fFillTraversals(row, slice, 0, slice.size());
+			}
 		}
 		void fConstructGrid() const {
 			pGrid.clear();
 
-			/* compute the minimum width to give to the graph (minimum
-			*	required plus maximum number of crossings between two layers) */
-			size_t lastWidth = 0, totalWidth = 0;
+			/* compute the minimum width to give to the graph */
+			size_t totalWidth = 0;
 			for (const detail::Layer& layer : pLayers) {
-				size_t width = layer.points.size(), crossings = 0;
+				size_t width = layer.points.size();
 
-				/* helper to sum up the crossings of the current edge with the previous edges */
-				const auto fetchCrossings = [&layer](size_t until, size_t target) -> size_t {
-					size_t count = 0;
-					for (size_t i = 0; i < until; ++i) {
-						if (const detail::Traverse* traverse = layer.points[i].isTraverse(); traverse != nullptr)
-							count += (traverse->prev > target ? 1 : 0);
-						else for (const detail::Endpoint& ep : layer.points[i].node().end)
-							count += (ep.other > target ? 1 : 0);
-					}
-					return count;
-				};
-
-				/* iterate over all points and update the width due to the node and compute the crossings */
+				/* find the node in the points and update the total width accordingly and patch teh total width */
 				for (size_t i = 0; i < layer.points.size(); ++i) {
-					if (const detail::Node* node = layer.points[i].isNode(); node != nullptr) {
-						for (const detail::Endpoint& ep : node->end)
-							crossings += fetchCrossings(i, ep.other);
+					if (const detail::Node* node = layer.points[i].isNode(); node != nullptr)
 						width += std::max<size_t>(node->start.size(), node->end.size()) - 1;
-					}
-					else
-						crossings += fetchCrossings(i, layer.points[i].traverse().prev);
 				}
-
-				/* patch the total width to include the width plus the crossings for both this and the previous layer */
-				totalWidth = std::max<size_t>({ totalWidth, width + crossings, lastWidth + crossings });
-				lastWidth = width;
+				totalWidth = std::max<size_t>(totalWidth, width);
 			}
 
 			/* fetch the initial node mapping and iterate over the layers and convert
