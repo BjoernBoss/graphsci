@@ -153,7 +153,7 @@ namespace ascg::detail {
 
 	private:
 		GridScore fMeasureGrid() const {
-			GridScore score{ .height = pGrid.size(), .width = pGrid[0].size(), .corners = 0 };
+			GridScore score{ .height = pGrid.size(), .corners = 0, .width = pGrid[0].size() };
 
 			/* count the number of corners in the grid */
 			for (const detail::Row& row : pGrid) {
@@ -175,6 +175,8 @@ namespace ascg::detail {
 			/* check if a new best graph has been encountered and return the diff for the caller to apply it */
 			if (cmp > 0)
 				bestGrid = pGrid, bestScore = score;
+			else if (cmp < 0)
+				pGrid = bestGrid;
 			return cmp;
 		}
 
@@ -1315,23 +1317,36 @@ namespace ascg::detail {
 			}
 		}
 		void fBuildFixInterlocks() const {
-			/* iterate twice for each directions to allow connections to settle (not more to prevent
-			*	oscillations; interlocks are rare and will therefore not be triggered frequently) */
-			for (size_t i = 0; i < 4; ++i) {
-				bool leftwards = (i % 2 == 0);
+			/* collect the current best grid state as basis for interlock fixing and
+			*	cache the best state to be able to recover it on worse performances */
+			std::vector<detail::Row> bestGrid = pGrid;
+			GridScore bestScore = fMeasureGrid();
 
-				/* fix all interlocks into the given direction and propagate any changes out of the graph */
-				while (fFixInterlocks(leftwards)) {
+			/* iterate until no more interlock fixings reduce the overall grid dimensions */
+			for (size_t i = 0;; ++i) {
+				bool dirty = false, leftwards = (i % 2 == 0);
+
+				/* forward-iterate the interlock fixing into the given
+				*	direction until one results in a positive outcome */
+				GridPoint point{};
+				while (fFixInterlocks(leftwards, point)) {
+					/* first straighten the graph into the given direction, in order for any fix-changes
+					*	to propagate properly, and then perform a general straightening and shrinking */
 					while (fStraightenGraph(leftwards ? Alignment::leftwards : Alignment::rightwards));
+					fBuildStraighten();
 
-					/* perform an intermediate vertical shrinking to remove
-					*	temporary shift rows introduced by the interlock fixing */
-					fShrinkVertical();
+					/* advance the point and check if a new best grid has been reached
+					*	and otherwise revert the state, should the state have become worse */
+					++point.x;
+					if (intptr_t cmp = fApplyBestGrid(bestGrid, bestScore); cmp > 0)
+						point = { .x = 0, .y = 0 }, dirty = true;
 				}
-			}
 
-			/* straighten the final graph one final complete time (automatically shrinks) */
-			fBuildStraighten();
+				/* check if the fixing results in changes, in which
+				*	case fixes into the other direction can be repeated */
+				if (i > 0 && !dirty)
+					break;
+			}
 		}
 
 	public:
@@ -1354,13 +1369,11 @@ namespace ascg::detail {
 			while (true) {
 				/* fix any encountered interlocks (will automatically straighten the graph) */
 				fBuildFixInterlocks();
+				fCompressVertical();
 
 				/* check if a new best graph has been encountered or restore the last best grid */
-				GridScore score = fMeasureGrid(pGrid);
-				if (int8_t cmp = score.compare(bestScore); cmp > 0)
-					bestGrid = pGrid, bestScore = score, nodeOpen.clear(), nodeClosed.clear(), nodeCurrent = std::nullopt;
-				else if (cmp < 0)
-					pGrid = bestGrid;
+				if (intptr_t cmp = fApplyBestGrid(bestGrid, bestScore); cmp > 0)
+					nodeOpen.clear(), nodeClosed.clear(), nodeCurrent = std::nullopt;
 
 				/* check if another shift can be performed or if the limit has been reached */
 				if (iterations.has_value() && (*iterations)-- == 0)
