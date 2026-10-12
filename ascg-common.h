@@ -29,11 +29,18 @@ namespace ascg::detail {
 	struct Layer;
 	class Renderer;
 
-	inline void PrintGrid(auto& grid) {
+	inline void PrintGrid(auto& grid, std::initializer_list<std::pair<size_t, size_t>> highlight = {}) {
 		str::PrintLn();
 		std::vector<detail::Layer> layers(grid.size());
-		for (const std::string& line : detail::Renderer{ layers, grid }.draw(0).first)
+		std::vector<std::string> lines = detail::Renderer{ layers, grid }.draw(0).first;
+
+		size_t index = 0;
+		for (const auto& [x, y] : highlight)
+			lines[y][x * 2] = "0123456789ABCDEF"[index++];
+
+		for (const std::string& line : lines)
 			str::PrintLn('[', line, ']');
+		return;
 	}
 }
 
@@ -50,26 +57,27 @@ namespace ascg::detail {
 			bool operator!=(Iterator other) const { return !(*this == other); }
 		};
 
-	public:
-		size_t first = 0;
-		size_t last = 0;
+	private:
+		size_t pBegin = 0;
+		size_t pEnd = 0;
 
 	public:
-		MinMaxWalk(size_t a, size_t b, bool exclusive) : first{ std::min(a, b) }, last{ std::max(a, b) } {
-			if (exclusive) {
-				if (++first < last)
-					--last;
-				else
-					++first;
-			}
+		MinMaxWalk(size_t a, size_t b, bool exclusive) : pBegin{ std::min(a, b) }, pEnd{ std::max(a, b) + 1 } {
+			if (exclusive && ++pBegin < pEnd)
+				--pEnd;
 		}
-		Iterator begin() const { return Iterator{ first }; };
-		Iterator end() const { return Iterator{ last + 1 }; };
+		Iterator begin() const { return Iterator{ pBegin }; };
+		Iterator end() const { return Iterator{ pEnd }; };
 	};
 	inline size_t Towards(size_t value, size_t other, size_t step = 1) {
 		if (value == other)
 			return value;
 		return (value < other ? value + step : value - step);
+	}
+	inline size_t AwayFrom(size_t value, size_t other, size_t step = 1) {
+		if (value == other)
+			return value;
+		return (value < other ? value - step : value + step);
 	}
 	inline bool Inbetween(size_t value, size_t a, size_t b) {
 		if (a > b) std::swap(a, b);
