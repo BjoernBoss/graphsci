@@ -127,8 +127,9 @@ namespace ascg::detail {
 		};
 		struct GridScore {
 			size_t height = 0;
-			size_t corners = 0;
 			size_t width = 0;
+			size_t crossings = 0;
+			size_t corners = 0;
 		};
 		struct NodePoint {
 			size_t index = 0;
@@ -153,31 +154,37 @@ namespace ascg::detail {
 
 	private:
 		GridScore fMeasureGrid() const {
-			GridScore score{ .height = pGrid.size(), .corners = 0, .width = pGrid[0].size() };
+			GridScore score{ .height = pGrid.size(), .width = pGrid[0].size(), .crossings = 0, .corners = 0 };
 
 			/* count the number of corners in the grid */
 			for (const detail::Row& row : pGrid) {
-				for (const detail::Cell& cell : row)
+				for (const detail::Cell& cell : row) {
+					score.crossings += (cell.kind == detail::CellKind::crossing ? 1 : 0);
 					score.corners += (cell.anyCorner() ? 1 : 0);
+				}
 			}
 			return score;
 		}
-		intptr_t fApplyBestGrid(std::vector<detail::Row>& bestGrid, GridScore& bestScore) const {
+		bool fApplyBestGrid(std::vector<detail::Row>& bestGrid, GridScore& bestScore) const {
 			GridScore score = fMeasureGrid();
 
-			/* compare the new grid score to the currently best score */
-			intptr_t cmp = [](const GridScore& a, const GridScore& b) -> intptr_t {
-				if (a.height != b.height) return (b.height - a.height);
-				if (a.corners != b.corners) return (b.corners - a.corners);
-				return (b.width - a.width);
-			}(score, bestScore);
+			/* compare the grid score to determine if a change has occurred */
+			intptr_t cmp = 0;
+			if (score.height != bestScore.height)
+				cmp = (bestScore.height - score.height);
+			else if (score.width != bestScore.width)
+				cmp = (bestScore.width - score.width);
+			else if (score.crossings != bestScore.crossings)
+				cmp = (bestScore.crossings - score.crossings);
+			else if (score.corners != bestScore.corners)
+				cmp = (bestScore.corners - score.corners);
 
-			/* check if a new best graph has been encountered and return the diff for the caller to apply it */
+			/* check if a new best graph has been encountered and apply it and notify the caller */
 			if (cmp > 0)
 				bestGrid = pGrid, bestScore = score;
 			else if (cmp < 0)
 				pGrid = bestGrid;
-			return cmp;
+			return (cmp > 0);
 		}
 
 	private:
@@ -1190,7 +1197,7 @@ namespace ascg::detail {
 				return 1;
 			return 0;
 		}
-		bool fShiftNode(std::map<NodePoint, intptr_t>& open, std::set<NodePoint>& closed, std::optional<NodePoint>& current) const {
+		bool fShiftNode(std::map<NodePoint, intptr_t>& open, std::set<NodePoint>& closed, std::optional<NodePoint>& current, bool fastNodeShift) const {
 			/* node placement is identified by its index and first cell position, as for each grid, the
 			*	rows may be slightly shifted, but the overall starting horizontal position can be expected
 			*	to be consistent, as any shifts in it are assumed to also invalidate the grid score */
@@ -1210,8 +1217,8 @@ namespace ascg::detail {
 				nodeMap.push_back(y);
 
 				/* check if the left or right direction can potentially be pursued and is not already queued for it */
-				bool leftCheck = (first > 0 && row[first - 1].isEmpty() && !closed.contains(leftPoint) && !open.contains(leftPoint));
-				bool rightCheck = (last + 1 < row.size() && row[last + 1].isEmpty() && !closed.contains(rightPoint) && !open.contains(rightPoint));
+				bool leftCheck = (first > 0 && !closed.contains(leftPoint) && !open.contains(leftPoint));
+				bool rightCheck = (last + 1 < row.size() && !closed.contains(rightPoint) && !open.contains(rightPoint));
 				if (!leftCheck && !rightCheck)
 					continue;
 
@@ -1229,34 +1236,38 @@ namespace ascg::detail {
 						++(shift < 0 ? leftScore : rightScore);
 				}
 
-				/* insert the potential moves into the open set */
-				if (leftCheck && leftScore > 0)
-					open.insert({ leftPoint, leftScore - rightScore - emptyScore });
-				if (rightCheck && rightScore > 0)
-					open.insert({ rightPoint, rightScore - leftScore - emptyScore });
+				/* insert the potential moves into the open set and update the scores accordingly (in fast
+				*	mode, consider if the neighbor is empty, in which case fewer moves might be pursued) */
+				if (leftCheck && leftScore > 0) {
+					intptr_t spaceScore = 0;
+					if (fastNodeShift)
+						spaceScore = static_cast<intptr_t>(row[first - 1].isEmpty() ? pGrid.size() * 2 : 0);
+					open.insert({ leftPoint, leftScore - rightScore - emptyScore + spaceScore });
+				}
+				if (rightCheck && rightScore > 0) {
+					intptr_t spaceScore = 0;
+					if (fastNodeShift)
+						spaceScore = static_cast<intptr_t>(row[last + 1].isEmpty() ? pGrid.size() * 2 : 0);
+					open.insert({ rightPoint, rightScore - leftScore - emptyScore + spaceScore });
+				}
 			}
 
 			/* helper to evaluate a given nodepoint */
-			const auto evaluatePoint = [this, &nodeMap](const NodePoint& pt, size_t& distance, size_t& emptySlot, bool& leftwards) -> int8_t {
+			const auto evaluatePoint = [this, &nodeMap](const NodePoint& pt, size_t& distance, size_t& emptySlot, bool& leftwards) -> bool {
 				detail::Row& row = pGrid[nodeMap[pt.index]];
 
 				/* check if the node position has already been reached */
 				size_t first = std::ranges::find(row, detail::CellKind::node, &detail::Cell::kind) - row.begin(), last = 0;
 				if (pt.x == first)
-					return -1;
+					return false;
 				for (size_t i = first; i < row.size() && row[i].isNode(); ++i)
 					last = i;
-
-				/* check if the movement is currently not possible as it is blocked (indices must still be valid
-				*	as only valid-bounded entries are added to the queue and any bound-changes invalidate the lists) */
 				leftwards = (pt.x < first);
-				if (!(leftwards ? row[first - 1] : row[last + 1]).isEmpty())
-					return 0;
 
 				/* compute the points distance to its target and the next spot to mark as empty to move into the given direction */
 				distance = (leftwards ? first - pt.x : pt.x - first);
 				emptySlot = (leftwards ? last : first);
-				return 1;
+				return true;
 			};
 
 			/* check if a previous far away goal still exists and check if its still a
@@ -1265,7 +1276,7 @@ namespace ascg::detail {
 			bool bestLeftwards = false;
 			auto best = open.end();
 			if (current.has_value()) {
-				if (evaluatePoint(*current, bestDistance, bestEmptySlot, bestLeftwards) > 0)
+				if (evaluatePoint(*current, bestDistance, bestEmptySlot, bestLeftwards))
 					best = open.find(*current);
 				else
 					open.erase(*current);
@@ -1283,9 +1294,9 @@ namespace ascg::detail {
 				*	option, as it is closer to the current grid-state or has a better score */
 				size_t distance = 0, emptySlot = 0;
 				bool leftwards = false;
-				if (int8_t state = evaluatePoint(it->first, distance, emptySlot, leftwards); state < 0)
+				if (!evaluatePoint(it->first, distance, emptySlot, leftwards))
 					it = open.erase(it);
-				else if (state > 0 && (best == open.end() || bestDistance > distance || best->second < it->second))
+				else if (best == open.end() || bestDistance > distance || best->second < it->second)
 					best = it++, bestDistance = distance, bestEmptySlot = emptySlot, bestLeftwards = leftwards;
 				else
 					++it;
@@ -1335,10 +1346,9 @@ namespace ascg::detail {
 					while (fStraightenGraph(leftwards ? Alignment::leftwards : Alignment::rightwards));
 					fBuildStraighten();
 
-					/* advance the point and check if a new best grid has been reached
-					*	and otherwise revert the state, should the state have become worse */
+					/* advance the point and check if a new best grid has been reached and reset the state accordingly */
 					++point.x;
-					if (intptr_t cmp = fApplyBestGrid(bestGrid, bestScore); cmp > 0)
+					if (fApplyBestGrid(bestGrid, bestScore))
 						point = { .x = 0, .y = 0 }, dirty = true;
 				}
 
@@ -1347,10 +1357,13 @@ namespace ascg::detail {
 				if (i > 0 && !dirty)
 					break;
 			}
+
+			/* reset the grid to the best state (to capture minor best scores as well) */
+			std::swap(pGrid, bestGrid);
 		}
 
 	public:
-		std::vector<detail::Row> build(std::optional<size_t> iterations) const {
+		std::vector<detail::Row> build(std::optional<size_t> iterations, bool fastNodeShift) const {
 			/* check if the layers are empty, in which case nothing needs to be done, and
 			*	otherwise create the initial grid and straighten it (cannot be empty anymore) */
 			if (pLayers.empty())
@@ -1367,12 +1380,13 @@ namespace ascg::detail {
 			std::set<NodePoint> nodeClosed;
 			std::optional<NodePoint> nodeCurrent;
 			while (true) {
-				/* fix any encountered interlocks (will automatically straighten the graph) */
+				/* fix any encountered interlocks (will automatically straighten the graph) and perform a full
+				*	compression to ensure that the temporary representations do not block true better results */
 				fBuildFixInterlocks();
 				fCompressVertical();
 
-				/* check if a new best graph has been encountered or restore the last best grid */
-				if (intptr_t cmp = fApplyBestGrid(bestGrid, bestScore); cmp > 0)
+				/* check if a new best graph has been encountered and reset all corresponding state */
+				if (!nodeCurrent.has_value() && fApplyBestGrid(bestGrid, bestScore))
 					nodeOpen.clear(), nodeClosed.clear(), nodeCurrent = std::nullopt;
 
 				/* check if another shift can be performed or if the limit has been reached */
@@ -1381,20 +1395,14 @@ namespace ascg::detail {
 
 				/* try to shift another node into a better place, in which
 				*	case the straightening and measuring can be repeated */
-				if (!fShiftNode(nodeOpen, nodeClosed, nodeCurrent))
+				if (!fShiftNode(nodeOpen, nodeClosed, nodeCurrent, fastNodeShift))
 					break;
 				fBuildStraighten();
+				int k = 0;
 			}
 
-			/* perform the final full compression (will already be shrunk in both directions; compression on the
-			*	horizontal is not necessary, as the graph straightening operations are developed to essentially
-			*	perform the horizontal compression to the point that the simple shrinkening is enough) */
-			fCompressVertical();
-
-			/* return the complete generated grid from the internal state */
-			std::vector<detail::Row> grid;
-			std::swap(pGrid, grid);
-			return grid;
+			/* return the complete generated grid (use the best state to capture minor best scores as well) */
+			return bestGrid;
 		}
 	};
 }
