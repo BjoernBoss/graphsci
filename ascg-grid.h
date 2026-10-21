@@ -828,7 +828,10 @@ namespace ascg::detail {
 			return true;
 		}
 		bool fStraightenGraph(Alignment align) const {
-			/* find the next corner to pursue (iterate until one has been found or all have been checked) */
+			bool changed = false;
+
+			/* find the next corner to pursue (iterate until all possible corners
+			*	have been found and return a change to indicate another sweep) */
 			for (size_t y = 0; y < pGrid.size(); ++y) {
 				detail::Row& row = pGrid[y];
 
@@ -888,10 +891,10 @@ namespace ascg::detail {
 					}
 					pGrid[y][target].kind = (target == x ? detail::CellKind::vertical : pGrid[y][xOther].kind);
 					pGrid[y][xOther].kind = detail::CellKind::empty;
-					return true;
+					changed = true;
 				}
 			}
-			return false;
+			return changed;
 		}
 		bool fFixInterlocks(bool leftwards, GridPoint& point) const {
 			/* find the next corner to pursue (iterate until one has been found or all have been checked) */
@@ -1149,7 +1152,11 @@ namespace ascg::detail {
 				endReached = true;
 			}
 		}
-		void fCompressVertical() const {
+		void fCompressGrid() const {
+			/* perform a full horizontal shrinking to remove any unnecessary horizontals (no need for in-depth
+			*	merging and removing, as the straightening's and interlock-fixings already do so implicitly) */
+			fShrinkHorizontal();
+
 			/* check if the grid is only a strip, in which case the simple shrinking will already
 			*	have been enough (will otherwise lead to edge-cases in the strand search) */
 			if (pGrid[0].size() == 1)
@@ -1318,13 +1325,15 @@ namespace ascg::detail {
 		}
 
 	private:
-		void fBuildStraighten() const {
-			/* first straighten across the graph and then finally outwards
-			*	and shrink the graph to remove unnecessary rows and columns */
-			for (auto align : { Alignment::leftwards, Alignment::rightwards, Alignment::outwards }) {
+		void fBuildStraighten(bool leftFirst) const {
+			Alignment first = (leftFirst ? Alignment::leftwards : Alignment::rightwards);
+			Alignment second = (leftFirst ? Alignment::rightwards : Alignment::leftwards);
+
+			/* first straighten across the graph from each direction and then
+			*	finally outwards and shrink the graph to remove unnecessary rows */
+			for (auto align : { first, second, Alignment::outwards }) {
 				while (fStraightenGraph(align));
 				fShrinkVertical();
-				fShrinkHorizontal();
 			}
 		}
 		void fBuildFixInterlocks() const {
@@ -1343,8 +1352,7 @@ namespace ascg::detail {
 				while (fFixInterlocks(leftwards, point)) {
 					/* first straighten the graph into the given direction, in order for any fix-changes
 					*	to propagate properly, and then perform a general straightening and shrinking */
-					while (fStraightenGraph(leftwards ? Alignment::leftwards : Alignment::rightwards));
-					fBuildStraighten();
+					fBuildStraighten(leftwards);
 
 					/* advance the point and check if a new best grid has been reached and reset the state accordingly */
 					++point.x;
@@ -1369,7 +1377,7 @@ namespace ascg::detail {
 			if (pLayers.empty())
 				return {};
 			fConstructGrid();
-			fBuildStraighten();
+			fBuildStraighten(true);
 
 			/* setup the currently best grid version (to be able to recover to it in case of worse visited graphs) */
 			std::vector<detail::Row> bestGrid = pGrid;
@@ -1383,7 +1391,7 @@ namespace ascg::detail {
 				/* fix any encountered interlocks (will automatically straighten the graph) and perform a full
 				*	compression to ensure that the temporary representations do not block true better results */
 				fBuildFixInterlocks();
-				fCompressVertical();
+				fCompressGrid();
 
 				/* check if a new best graph has been encountered and reset all corresponding state */
 				if (!nodeCurrent.has_value() && fApplyBestGrid(bestGrid, bestScore))
@@ -1397,8 +1405,7 @@ namespace ascg::detail {
 				*	case the straightening and measuring can be repeated */
 				if (!fShiftNode(nodeOpen, nodeClosed, nodeCurrent, fastNodeShift))
 					break;
-				fBuildStraighten();
-				int k = 0;
+				fBuildStraighten(true);
 			}
 
 			/* return the complete generated grid (use the best state to capture minor best scores as well) */

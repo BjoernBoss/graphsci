@@ -15,6 +15,8 @@
 
 
 /*
+*	Integrate proper metric for grid complexity? Or have it just use a 'process' method so the user can decide when to stop?
+*
 *	cleanup in includes
 *	add self-loops?/double-edges?/directions?
 *
