@@ -855,7 +855,7 @@ namespace ascg::detail {
 					if (!(dirLeftwards ? cell.cornerRight() : cell.cornerLeft()))
 						continue;
 
-					/* resolve the indentation and check if a reduction path can be found and apply it */
+					/* resolve the indentation corner and check if a target axis to be reduced by can be found */
 					size_t xOther = x, yOther = y, xEnd = 0, target = 0;
 					if (!fMapIndentCorner(x, y, xOther, yOther, xEnd, target) || target == xOther)
 						continue;
@@ -908,8 +908,8 @@ namespace ascg::detail {
 					if (!(leftwards ? cell.cornerRight() : cell.cornerLeft()))
 						continue;
 
-					/* resolve the indentation and check if the current indentation is blocked by
-					*	another indentation into the opposite direction and try to resolve them */
+					/* resolve the surrounding indentation corner and check that no relevant target was found
+					*	(should not happen, as it would have been resolved by a previous graph straightening) */
 					size_t xOther = point.x, yOther = point.y, xEnd = 0, target = 0;
 					if (!fMapIndentCorner(point.x, point.y, xOther, yOther, xEnd, target) || target != xOther)
 						continue;
