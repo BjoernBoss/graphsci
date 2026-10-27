@@ -31,10 +31,11 @@ namespace ascg::detail {
 	struct Layer;
 	class Renderer;
 
+	template <class RendererType = detail::Renderer>
 	inline void PrintGrid(auto& grid, std::initializer_list<std::pair<size_t, size_t>> highlight = {}) {
 		str::PrintLn();
 		std::vector<detail::Layer> layers(grid.size());
-		std::vector<std::string> lines = detail::Renderer{ layers, grid }.draw(0).first;
+		std::vector<std::string> lines = RendererType{ layers, grid }.draw(0).first;
 
 		size_t index = 0;
 		for (const auto& [x, y] : highlight)

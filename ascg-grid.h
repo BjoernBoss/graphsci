@@ -140,6 +140,10 @@ namespace ascg::detail {
 				return (x < r.x);
 			}
 		};
+		struct ShiftTarget {
+			NodePoint point;
+			size_t distance = 0;
+		};
 		struct GridPoint {
 			size_t x = 0;
 			size_t y = 0;
@@ -1106,7 +1110,7 @@ namespace ascg::detail {
 
 				/* check if the end has been reached, in which case the index needs to
 				*	be reverted and the next range of the previous neighbor checked */
-				if (endReached = (begin >= prevEnd)) {
+				if ((endReached = (begin >= prevEnd))) {
 					if (x == 0)
 						return false;
 					--x;
@@ -1192,10 +1196,8 @@ namespace ascg::detail {
 				return 0;
 
 			/* follow the strand until the first corner or other end-block is reached */
-			while (pGrid[y][x].lineVertical()) {
-				detail::Row& row = pGrid[y];
+			while (pGrid[y][x].lineVertical())
 				y = detail::Towards(y, last);
-			}
 
 			/* evaluate the final pull direction */
 			if (pGrid[y][x].cornerLeft())
@@ -1204,7 +1206,7 @@ namespace ascg::detail {
 				return 1;
 			return 0;
 		}
-		bool fShiftNode(std::map<NodePoint, intptr_t>& open, std::set<NodePoint>& closed, std::optional<NodePoint>& current, bool fastNodeShift) const {
+		bool fShiftNode(std::map<NodePoint, intptr_t>& open, std::set<NodePoint>& closed, std::optional<ShiftTarget>& current, bool fastNodeShift) const {
 			/* node placement is identified by its index and first cell position, as for each grid, the
 			*	rows may be slightly shifted, but the overall starting horizontal position can be expected
 			*	to be consistent, as any shifts in it are assumed to also invalidate the grid score */
@@ -1263,9 +1265,10 @@ namespace ascg::detail {
 			const auto evaluatePoint = [this, &nodeMap](const NodePoint& pt, size_t& distance, size_t& emptySlot, bool& leftwards) -> bool {
 				detail::Row& row = pGrid[nodeMap[pt.index]];
 
-				/* check if the node position has already been reached */
+				/* check if the node position has already been reached or if the point is stale
+				*	(due to being a far away outdated target, which is not reachable anymore) */
 				size_t first = std::ranges::find(row, detail::CellKind::node, &detail::Cell::kind) - row.begin(), last = 0;
-				if (pt.x == first)
+				if (pt.x == first || pt.x >= row.size())
 					return false;
 				for (size_t i = first; i < row.size() && row[i].isNode(); ++i)
 					last = i;
@@ -1277,16 +1280,16 @@ namespace ascg::detail {
 				return true;
 			};
 
-			/* check if a previous far away goal still exists and check if its still a
-			*	relevant target, in which case it automatically becomes the best choice) */
+			/* check if a previous far away goal still exists and check if its still a relevant target, in which case it automatically
+			*	becomes the best choice (must have come closer as the iteration may otherwise move the grid over and result in a loop) */
 			size_t bestDistance = 0, bestEmptySlot = 0;
 			bool bestLeftwards = false;
 			auto best = open.end();
 			if (current.has_value()) {
-				if (evaluatePoint(*current, bestDistance, bestEmptySlot, bestLeftwards))
-					best = open.find(*current);
+				if (evaluatePoint(current->point, bestDistance, bestEmptySlot, bestLeftwards) && bestDistance < current->distance)
+					best = open.find(current->point);
 				else
-					open.erase(*current);
+					open.erase(current->point);
 			}
 
 			/* if no target to follow exists, find the next entry in the open list to apply */
@@ -1320,7 +1323,7 @@ namespace ascg::detail {
 			if (bestDistance == 1)
 				open.erase(best);
 			else
-				current = best->first;
+				current = ShiftTarget{ .point = best->first, .distance = bestDistance };
 			return true;
 		}
 
@@ -1332,9 +1335,34 @@ namespace ascg::detail {
 			/* first straighten across the graph from each direction and then
 			*	finally outwards and shrink the graph to remove unnecessary rows */
 			for (auto align : { first, second, Alignment::outwards }) {
-				while (fStraightenGraph(align));
-				fShrinkVertical();
+				size_t halfGrid = 0;
+
+				/* check if this is the outwards move, in which case the center axis is needed
+				*	to determine direction (use the axis at the start of outward moving) */
+				if (align == Alignment::outwards) {
+					size_t left = pGrid[0].size() - 1, right = 0;
+
+					/* find the leftmost and rightmost edges over all columns (there
+					*	must be at least one non-empty row and hence left <= right) */
+					for (const detail::Row& row : pGrid) {
+						size_t l = 0, r = row.size() - 1;
+						while (l < left && row[l].isEmpty())
+							++l;
+						while (r > right && row[r].isEmpty())
+							--r;
+						left = std::min<size_t>(left, l);
+						right = std::max<size_t>(right, r);
+					}
+					halfGrid = (left + right) / 2;
+				}
+
+				/* apply the straightening until no more corners to be straightened are found in the given direction */
+				while (fStraightenGraph(align, halfGrid));
 			}
+
+			/* perform a shrinking to ensure irrelevant rows opened by the
+			*	straigthening do not strain the remainder of the algorithm */
+			fShrinkVertical();
 		}
 		void fBuildFixInterlocks() const {
 			/* collect the current best grid state as basis for interlock fixing and
@@ -1384,9 +1412,9 @@ namespace ascg::detail {
 			GridScore bestScore = fMeasureGrid();
 
 			/* iterate until no more nodes need to be shifted or the iterations limit has been reached */
+			std::optional<ShiftTarget> nodeCurrent;
 			std::map<NodePoint, intptr_t> nodeOpen;
 			std::set<NodePoint> nodeClosed;
-			std::optional<NodePoint> nodeCurrent;
 			while (true) {
 				/* fix any encountered interlocks (will automatically straighten the graph) and perform a full
 				*	compression to ensure that the temporary representations do not block true better results */
