@@ -148,6 +148,40 @@ namespace ascg::detail {
 			size_t x = 0;
 			size_t y = 0;
 		};
+		struct GridRect {
+			size_t left = 0;
+			size_t top = 0;
+			size_t right = 0;
+			size_t bottom = 0;
+			bool empty() const {
+				return (left == right && top == bottom);
+			}
+			bool overlap(const GridRect& o) const {
+				return (left <= o.right && right >= o.left && top <= o.bottom && bottom >= o.top);
+			}
+			GridRect merge(const GridRect& o) const {
+				return GridRect{
+					.left = std::min<size_t>(left, o.left),
+					.top = std::min<size_t>(top, o.top),
+					.right = std::max<size_t>(right, o.right),
+					.bottom = std::max<size_t>(bottom, o.bottom)
+				};
+			}
+		};
+		struct ChangeCorner {
+			GridRect rect;
+			size_t age = 0;
+			size_t x = 0;
+		};
+		struct ChangeRow {
+			std::vector<ChangeCorner> corners;
+			GridRect rect;
+			size_t age = 0;
+		};
+		struct ChangeCache {
+			std::vector<ChangeRow> rows;
+			std::vector<GridRect> changes;
+		};
 
 	private:
 		const std::vector<detail::Layer>& pLayers;
@@ -831,43 +865,86 @@ namespace ascg::detail {
 			pGrid[yDetour][xSpacer].kind = detail::Cell{ kindDetour }.mirrorFull();
 			return true;
 		}
-		bool fStraightenGraph(Alignment align) const {
-			bool changed = false;
+		bool fChangeCheckOutdated(const GridRect& rect, size_t age, const ChangeCache& changes) const {
+			/* check if the rectangle itself is not yet valid */
+			if (rect.empty())
+				return true;
 
-			/* find the next corner to pursue (iterate until all possible corners
-			*	have been found and return a change to indicate another sweep) */
+			/* check if any changes since the last check overlap with the testing rectangle */
+			for (size_t i = age; i < changes.changes.size(); ++i) {
+				if (changes.changes[i].overlap(rect))
+					return true;
+			}
+			return false;
+		}
+		void fChangeCleanupRow(size_t y, ChangeCache& changes) const {
+			std::vector<ChangeCorner>& corners = changes.rows[y].corners;
+			detail::Row& row = pGrid[y];
+			size_t size = 0;
+
+			/* iterate over the current corners and check if they actually still map onto corners */
+			for (size_t i = 0; i < corners.size(); ++i) {
+				if (!row[corners[i].x].anyCorner())
+					continue;
+				else if (size != i)
+					corners[size] = corners[i];
+				++size;
+			}
+
+			/* update the size to the new reduces list size to remove all dropped slots */
+			corners.resize(size);
+		}
+		bool fStraightenGrid(Alignment align, size_t halfGrid, ChangeCache& changes) const {
+			bool dirty = false;
+
+			/* find the next corner to pursue (iterate until all possible corners have been evaluated and return a change to
+			*	indicate another sweep; only re-check corners, which might have become unblocked by changes since the last iteration) */
 			for (size_t y = 0; y < pGrid.size(); ++y) {
-				detail::Row& row = pGrid[y];
+				ChangeRow& row = changes.rows[y];
 
-				/* check if the width of the row needs to be determined (to find its center) */
-				size_t halfRow = row.size();
-				if (align == Alignment::outwards) {
-					while (halfRow > 0 && row[halfRow - 1].isEmpty())
-						--halfRow;
-					if (halfRow > 0) for (size_t i = 0; row[i].isEmpty(); ++i)
-						--halfRow;
-					halfRow /= 2;
-				}
+				/* check if the row is considered dirty and restart its iteration */
+				if (row.corners.empty() || !fChangeCheckOutdated(row.rect, row.age, changes))
+					continue;
+				row.rect = GridRect{};
+				row.age = changes.changes.size();
 
-				/* find any matching corners within the row */
-				for (size_t x = 0; x < row.size(); ++x) {
-					detail::Cell& cell = row[x];
+				/* iterate over the corners of the row and check if they are potential indented corners for this pass */
+				for (size_t i = 0; i < row.corners.size(); ++i) {
+					ChangeCorner& corner = row.corners[i];
+					size_t x = corner.x;
 
-					/* select the allowed direction to be used and check if the corner is a potential indented corner for this iteration
-					*	(must have a corner in the opposite direction in order to potentially want a change in the intended direction) */
-					bool dirLeftwards = (align == Alignment::outwards ? (x <= halfRow) : (align == Alignment::leftwards));
-					if (!(dirLeftwards ? cell.cornerRight() : cell.cornerLeft()))
+					/* check if the corner is a corner in the opposite direction in
+					*	order to potentially want a change in the intended direction */
+					bool dirLeftwards = (align == Alignment::outwards ? (x <= halfGrid) : (align == Alignment::leftwards));
+					if (!(dirLeftwards ? pGrid[y][x].cornerRight() : pGrid[y][x].cornerLeft()))
 						continue;
 
-					/* resolve the indentation corner and check if a target axis to be reduced by can be found */
-					size_t xOther = x, yOther = y, xEnd = 0, target = 0;
-					if (!fMapIndentCorner(x, y, xOther, yOther, xEnd, target) || target == xOther)
+					/* check if the corner is outdated and otherwise just update the row-rect (after
+					*	checking the direction to ensure the row-rect only contains relevant corners) */
+					if (!fChangeCheckOutdated(corner.rect, corner.age, changes)) {
+						row.rect = (row.rect.empty() ? corner.rect : row.rect.merge(corner.rect));
+						continue;
+					}
+
+					/* resolve the indentation corner and setup the rectangle of all
+					*	cells inspected by the given indentation-check operation */
+					size_t xOther = x, yOther = y, xEnd = x, target = 0;
+					bool valid = fMapIndentCorner(x, y, xOther, yOther, xEnd, target);
+					corner.rect = GridRect{
+						.left = std::min<size_t>({ x, xOther, xEnd }), .top = std::min<size_t>(y, yOther),
+						.right = std::max<size_t>({ x, xOther, xEnd }), .bottom = std::max<size_t>(y, yOther)
+					};
+					row.rect = (row.rect.empty() ? corner.rect : row.rect.merge(corner.rect));
+					corner.age = changes.changes.size();
+
+					/* check if a target axis to be reduced by was found */
+					if (!valid || target == xOther)
 						continue;
 					bool endIsNode = pGrid[yOther][xOther].isNode();
 
 					/* check if this is an outwards movement and the other side sits on the other side of
 					*	the center, in which case the move needs to be skipped to prevent oscillations */
-					if (align == Alignment::outwards && (xOther <= halfRow) != (x <= halfRow))
+					if (align == Alignment::outwards && (xOther <= halfGrid) != (x <= halfGrid))
 						continue;
 
 					/* move the vertical line over */
@@ -895,10 +972,27 @@ namespace ascg::detail {
 					}
 					pGrid[y][target].kind = (target == x ? detail::CellKind::vertical : pGrid[y][xOther].kind);
 					pGrid[y][xOther].kind = detail::CellKind::empty;
-					changed = true;
+
+					/* update the corners of the current row and mark it as dirty */
+					fChangeCleanupRow(y, changes);
+					if (target != x)
+						row.corners.push_back(ChangeCorner{ .x = target });
+					changes.rows[y].rect = GridRect{};
+
+					/* update the corners of the other row and mark it as dirty */
+					fChangeCleanupRow(yOther, changes);
+					if (!endIsNode && target != xEnd)
+						changes.rows[yOther].corners.push_back(ChangeCorner{ .x = target });
+					changes.rows[yOther].rect = GridRect{};
+
+					/* add the rect as change and restart the straightening of the current row */
+					changes.changes.push_back(corner.rect);
+					dirty = true;
+					--y;
+					break;
 				}
 			}
-			return changed;
+			return dirty;
 		}
 		bool fFixInterlocks(bool leftwards, GridPoint& point) const {
 			/* find the next corner to pursue (iterate until one has been found or all have been checked) */
@@ -1331,6 +1425,18 @@ namespace ascg::detail {
 		void fBuildStraighten(bool leftFirst) const {
 			Alignment first = (leftFirst ? Alignment::leftwards : Alignment::rightwards);
 			Alignment second = (leftFirst ? Alignment::rightwards : Alignment::leftwards);
+			ChangeCache changes{ .rows = std::vector<ChangeRow>(pGrid.size()) };
+
+			/* collect all of the corners into the change cache */
+			for (size_t y = 0; y < pGrid.size(); ++y) {
+				const detail::Row& gridRow = pGrid[y];
+				ChangeRow& changeRow = changes.rows[y];
+
+				for (size_t x = 0; x < gridRow.size(); ++x) {
+					if (gridRow[x].anyCorner())
+						changeRow.corners.push_back(ChangeCorner{ .x = x });
+				};
+			}
 
 			/* first straighten across the graph from each direction and then
 			*	finally outwards and shrink the graph to remove unnecessary rows */
@@ -1356,12 +1462,15 @@ namespace ascg::detail {
 					halfGrid = (left + right) / 2;
 				}
 
-				/* apply the straightening until no more corners to be straightened are found in the given direction */
-				while (fStraightenGraph(align, halfGrid));
+				/* invalidate the row rectangles as they depend on the orientation of the straightening
+				*	and apply the straightening until no more corners are found into the given direction */
+				for (ChangeRow& row : changes.rows)
+					row.rect = GridRect{};
+				while (fStraightenGrid(align, halfGrid, changes));
 			}
 
 			/* perform a shrinking to ensure irrelevant rows opened by the
-			*	straigthening do not strain the remainder of the algorithm */
+			*	straightening do not strain the remainder of the algorithm */
 			fShrinkVertical();
 		}
 		void fBuildFixInterlocks() const {
