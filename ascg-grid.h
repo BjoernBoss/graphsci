@@ -579,7 +579,7 @@ namespace ascg::detail {
 				}
 
 				/* check if the left empty slot should be used and add the necessary rotations and patch the indices accordingly */
-				if ((leftMove > 0 && leftMove <= rightMove) || rightMove == 0) {
+				if (leftMove > 0 && (leftMove <= rightMove || rightMove == 0)) {
 					fInsertRotation(slice, bestTarget - leftMove, bestTarget, bestTarget - leftMove - 1, pGrid.size());
 					--bestTarget;
 					if (bestTarget > bestIndex && bestTarget - leftMove < bestIndex)
