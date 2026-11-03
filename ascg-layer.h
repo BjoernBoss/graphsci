@@ -181,6 +181,76 @@ namespace ascg::detail {
 		LayerBuilder(const std::vector<detail::Range>& ranges) : pRanges{ ranges } {}
 
 	private:
+		void fUpdatePrevPoint(detail::Point& point, size_t range, size_t to) const {
+			/* update the endpoint into the given direction to reference the new target */
+			if (detail::Traverse* traverse = point.isTraverse(); traverse != nullptr)
+				traverse->next = to;
+			else for (detail::Endpoint& ep : point.node().start) {
+				if (ep.range != range) continue;
+				ep.other = to;
+				break;
+			}
+		}
+		void fUpdateNextPoint(detail::Point& point, size_t range, size_t to) const {
+			/* update the endpoint into the given direction to reference the new target */
+			if (detail::Traverse* traverse = point.isTraverse(); traverse != nullptr)
+				traverse->prev = to;
+			else for (detail::Endpoint& ep : point.node().end) {
+				if (ep.range != range) continue;
+				ep.other = to;
+				break;
+			}
+		}
+		void fMovePoint(detail::Point& point, size_t to, size_t index) const {
+			/* update the referenced endpoints of the moved point to reference the new position */
+			if (detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
+				fUpdatePrevPoint(pLayers[index - 1].points[traverse->prev], traverse->range, to);
+				fUpdateNextPoint(pLayers[index + 1].points[traverse->next], traverse->range, to);
+				return;
+			}
+			for (detail::Endpoint& ep : point.node().end)
+				fUpdatePrevPoint(pLayers[index - 1].points[ep.other], ep.range, to);
+			for (detail::Endpoint& ep : point.node().start)
+				fUpdateNextPoint(pLayers[index + 1].points[ep.other], ep.range, to);
+		}
+		intptr_t fGetSwapDelta(size_t index, const detail::Point& l, const detail::Point& r) const {
+			/* helper to compute the crossing delta between two single endpoints or a list of endpoints */
+			const auto swapPair = [](size_t lOther, size_t rOther) -> intptr_t {
+				if (lOther == rOther)
+					return 0;
+				return (lOther < rOther ? 1 : -1);
+			};
+			const auto swapEndpoints = [swapPair](size_t lOther, const detail::Endpoints& rEps) -> intptr_t {
+				intptr_t delta = 0;
+				for (const detail::Endpoint& ep : rEps)
+					delta += swapPair(lOther, ep.other);
+				return delta;
+			};
+
+			/* check if at least one of the points is a transition, which makes the calculations easier */
+			if (const detail::Traverse* left = l.isTraverse(); left != nullptr) {
+				if (const detail::Traverse* right = r.isTraverse(); right != nullptr)
+					return swapPair(left->prev, right->prev) + swapPair(left->next, right->next);
+				const detail::Node& right = r.node();
+				return swapEndpoints(left->prev, right.end) + swapEndpoints(left->next, right.start);
+			}
+			else if (const detail::Traverse* right = r.isTraverse(); right != nullptr) {
+				const detail::Node& left = l.node();
+				return -(swapEndpoints(right->prev, left.end) + swapEndpoints(right->next, left.start));
+			}
+
+			/* compute the delta over the two nodes */
+			const detail::Node& left = l.node();
+			const detail::Node& right = r.node();
+			intptr_t delta = 0;
+			for (const detail::Endpoint& ep : left.end)
+				delta += swapEndpoints(ep.other, right.end);
+			for (const detail::Endpoint& ep : left.start)
+				delta += swapEndpoints(ep.other, right.start);
+			return delta;
+		}
+
+	private:
 		void fConstructLayers() const {
 			pLayers.clear();
 			if (pRanges.empty())
@@ -239,38 +309,94 @@ namespace ascg::detail {
 				}
 			}
 		}
-		void fMovePoint(detail::Point& point, size_t to, size_t index) const {
-			/* helper functions to patch the points in the neighboring layers */
-			const auto updatePrevPoint = [](detail::Point& point, size_t range, size_t to) {
-				if (detail::Traverse* traverse = point.isTraverse(); traverse != nullptr)
-					traverse->next = to;
-				else for (detail::Endpoint& ep : point.node().start) {
-					if (ep.range != range) continue;
-					ep.other = to;
-					break;
-				}
-			};
-			const auto updateNextPoint = [](detail::Point& point, size_t range, size_t to) {
-				if (detail::Traverse* traverse = point.isTraverse(); traverse != nullptr)
-					traverse->prev = to;
-				else for (detail::Endpoint& ep : point.node().end) {
-					if (ep.range != range) continue;
-					ep.other = to;
-					break;
-				}
-			};
+		bool fOptimizeLayer(size_t index) const {
+			std::set<Preferred> preferred;
+			detail::Layer& layer = pLayers[index];
 
-			/* update the referenced points of the moved point */
-			if (detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
-				updatePrevPoint(pLayers[index - 1].points[traverse->prev], traverse->range, to);
-				updateNextPoint(pLayers[index + 1].points[traverse->next], traverse->range, to);
-				return;
+			/* calculate the average position of each point based on its connected neighbors,
+			*	and sort the points new by this given target position (barycenter method) */
+			bool changed = false;
+			for (size_t i = 0; i < layer.points.size(); ++i) {
+				float average = 0.0f;
+
+				/* compute the average position of the endpoints to the current point */
+				const detail::Point& pt = layer.points[i];
+				if (const detail::Traverse* traverse = pt.isTraverse(); traverse != nullptr)
+					average = static_cast<float>(traverse->prev + traverse->next) / 2.0f;
+				else {
+					const detail::Node& node = pt.node();
+					for (const detail::Endpoint& ep : node.start)
+						average += static_cast<float>(ep.other);
+					for (const detail::Endpoint& ep : node.end)
+						average += static_cast<float>(ep.other);
+					average /= static_cast<float>(node.start.size() + node.end.size());
+				}
+
+				/* insert the new preferred position into the set and check if the position is
+				*	not at the end, in which case it must prefer to be placed somewhere else */
+				std::set<Preferred>::iterator it = preferred.insert(Preferred{ .average = average, .index = i }).first;
+				if (++it != preferred.end())
+					changed = true;
 			}
-			for (detail::Endpoint& ep : point.node().end)
-				updatePrevPoint(pLayers[index - 1].points[ep.other], ep.range, to);
-			for (detail::Endpoint& ep : point.node().start)
-				updateNextPoint(pLayers[index + 1].points[ep.other], ep.range, to);
+
+			/* check if the layer seems to have settled down */
+			if (!changed)
+				return false;
+
+			/* construct the new layer based on the new indices */
+			std::vector<detail::Point> oldPoints{ layer.points.size(), detail::Point{} };
+			std::swap(oldPoints, layer.points);
+			size_t next = 0;
+			for (auto it = preferred.begin(); it != preferred.end(); ++it) {
+				if (it->index != next)
+					fMovePoint(oldPoints[it->index], next, index);
+				layer.points[next++] = std::move(oldPoints[it->index]);
+			}
+			return true;
 		}
+		bool fShiftLayer(size_t index) const {
+			detail::Layer& layer = pLayers[index];
+			bool changed = false;
+
+			/* try to update the layer to minimize the crossings to the neighboring layers by shifting single nodes around */
+			for (size_t i = 0; i < layer.points.size(); ++i) {
+				intptr_t current = 0, bestScore = 0;
+				size_t bestIndex = i;
+
+				/* compute the change in the crossings if point i and j were to change position (as the crossings
+				*	with any other neighbors are not affected by this, only the edges of the two points can be
+				*	evaluated; provided the neighbors inbetween the points were already included into the calculation) */
+				for (size_t j = i + 1; j < layer.points.size(); ++j) {
+					current += fGetSwapDelta(index, layer.points[i], layer.points[j]);
+					if (current < bestScore)
+						bestScore = current, bestIndex = j;
+				}
+				current = 0;
+				for (size_t j = i; j > 0; --j) {
+					current += fGetSwapDelta(index, layer.points[j - 1], layer.points[i]);
+					if (current < bestScore)
+						bestScore = current, bestIndex = j - 1;
+				}
+
+				/* check if a new better position has been found */
+				if (bestScore >= 0)
+					continue;
+				changed = true;
+
+				/* move the point to the target position by swapping the neighbors
+				*	one-by-one to keep the references to neighbors valid */
+				for (size_t j = i; j != bestIndex;) {
+					size_t next = detail::Towards(j, bestIndex);
+					fMovePoint(layer.points[j], next, index);
+					fMovePoint(layer.points[next], j, index);
+					std::swap(layer.points[j], layer.points[next]);
+					j = next;
+				}
+			}
+			return changed;
+		}
+
+	private:
 		size_t fCountCrossings() const {
 			size_t count = 0;
 
@@ -302,66 +428,40 @@ namespace ascg::detail {
 			}
 			return count;
 		}
-		void fOptimizeLayer(size_t index) const {
-			std::set<Preferred> preferred;
-			detail::Layer& layer = pLayers[index];
-
-			/* calculate the average position of each point based on its connected neighbors,
-			*	and sort the points new by this given target position (barycenter method) */
-			bool changed = false;
-			for (size_t i = 0; i < layer.points.size(); ++i) {
-				float average = 0.0f;
-
-				const detail::Point& pt = layer.points[i];
-				if (const detail::Traverse* traverse = pt.isTraverse(); traverse != nullptr)
-					average = static_cast<float>(traverse->prev + traverse->next) / 2.0f;
-				else {
-					const detail::Node& node = pt.node();
-					for (const detail::Endpoint& ep : node.start)
-						average += static_cast<float>(ep.other);
-					for (const detail::Endpoint& ep : node.end)
-						average += static_cast<float>(ep.other);
-					average /= static_cast<float>(node.start.size() + node.end.size());
-				}
-
-				std::set<Preferred>::iterator it = preferred.insert(Preferred{ .average = average, .index = i }).first;
-				if (++it != preferred.end())
-					changed = true;
-			}
-			if (!changed)
-				return;
-
-			/* construct the new layer based on the new indices */
-			std::vector<detail::Point> oldPoints{ layer.points.size(), detail::Point{} };
-			std::swap(oldPoints, layer.points);
-			size_t next = 0;
-			for (auto it = preferred.begin(); it != preferred.end(); ++it) {
-				if (it->index != next)
-					fMovePoint(oldPoints[it->index], next, index);
-				layer.points[next++] = std::move(oldPoints[it->index]);
-			}
-		}
 
 	public:
 		std::vector<detail::Layer> build() const {
+			/* check if the ranges are empty, in which case nothing needs to be done,
+			*	and otherwise create the initial layers (cannot be empty anymore) */
+			if (pRanges.empty())
+				return {};
 			fConstructLayers();
+
 			str::PrintLn("Crossings: ", fCountCrossings());
 
-			if (pLayers.size() > 2) for (size_t j = 0; j < 8; ++j) {
+			/* perform the initial ordering by sweeping the barycenter method down and up the layers */
+			if (pLayers.size() > 2) for (size_t j = 0; j < 16; ++j) {
 				for (size_t i = 1; i < pLayers.size(); ++i) {
 					fOptimizeLayer(i);
 					str::PrintLn("Crossings: ", fCountCrossings());
 				}
-
-				if (pLayers.size() < 3)
-					continue;
-
 				for (size_t i = pLayers.size() - 1; i > 0; --i) {
 					fOptimizeLayer(i - 1);
 					str::PrintLn("Crossings: ", fCountCrossings());
 				}
 			}
 
+			/* try to reduce the crossings by shifting the nodes within the
+			*	layers to reduce crossings to the immediate neighbor layers */
+			for (bool changed = false;; changed = false) {
+				for (size_t i = 0; i < pLayers.size(); ++i)
+					changed = (fShiftLayer(i) || changed);
+				if (!changed)
+					break;
+				str::PrintLn("Crossings: ", fCountCrossings());
+			}
+
+			/* return the complete generated layers from the internal state */
 			std::vector<detail::Layer> layers;
 			std::swap(pLayers, layers);
 			return layers;
