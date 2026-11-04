@@ -2,17 +2,18 @@
 
 #include <string>
 #include <vector>
-#include <cinttypes>
+#include <cstdint>
 #include <algorithm>
 #include <ranges>
 #include <set>
 #include <map>
 #include <utility>
 #include <limits>
-#include <list>
 #include <variant>
 #include <optional>
 #include <unordered_set>
+#include <initializer_list>
+#include <concepts>
 
 
 /*
@@ -20,12 +21,18 @@
 *
 *	Add comments on LayerBuilder and GraphBuilder how they work
 *
-*	cleanup in includes
 *	add self-loops?/double-edges?/directions?
 *
 *	add bounds (like: max node-shifting iterations/max...) to conditionally ensure algorithm limits
 */
 #include <ustring/ustring.h>
+
+namespace ascg {
+	/* callable queried between the optimization iterations, returning true
+	*	stops the execution and the best result found so far is returned */
+	template <class Type>
+	concept IterationStop = std::predicate<Type>;
+}
 
 namespace ascg::detail {
 	struct Layer;

@@ -1528,21 +1528,23 @@ namespace ascg::detail {
 			*	straightening do not strain the remainder of the algorithm */
 			fShrinkVertical();
 		}
-		void fBuildFixInterlocks() const {
+		bool fBuildFixInterlocks(ascg::IterationStop auto&& stopIteration) const {
 			/* collect the current best grid state as basis for interlock fixing and
 			*	cache the best state to be able to recover it on worse performances */
 			std::vector<detail::Row> bestGrid = pGrid;
 			GridScore bestScore = fMeasureGrid();
+			bool stopped = false;
 
-			/* alternate the fix direction until a pass yields no improvement (at least one pass per direction) */
-			for (size_t i = 0;; ++i) {
+			/* alternate the fix direction until a pass yields no improvement
+			*	(at least one pass per direction) or the stop has been requested */
+			for (size_t i = 0; !stopped; ++i) {
 				bool dirty = false, leftwards = (i % 2 == 0);
 
 				/* forward-iterate the interlock fixing into the given
 				*	direction until one results in a positive outcome */
 				GridPoint point{};
 				size_t fixInterlockHash = 0;
-				while (fFixInterlocks(leftwards, point, fixInterlockHash)) {
+				while (!(stopped = stopIteration()) && fFixInterlocks(leftwards, point, fixInterlockHash)) {
 					/* first straighten the graph into the given direction, in order for any fix-changes
 					*	to propagate properly, and then perform a general straightening and shrinking */
 					fBuildStraighten(leftwards);
@@ -1565,10 +1567,11 @@ namespace ascg::detail {
 
 			/* reset the grid to the best state (to capture minor best scores as well) */
 			std::swap(pGrid, bestGrid);
+			return !stopped;
 		}
 
 	public:
-		std::vector<detail::Row> build(std::optional<size_t> iterations) const {
+		std::vector<detail::Row> build(ascg::IterationStop auto&& stopIteration) const {
 			/* check if the layers are empty, in which case nothing needs to be done, and
 			*	otherwise create the initial grid and straighten it (cannot be empty anymore) */
 			if (pLayers.empty())
@@ -1580,22 +1583,23 @@ namespace ascg::detail {
 			std::vector<detail::Row> bestGrid = pGrid;
 			GridScore bestScore = fMeasureGrid();
 
-			/* iterate until no more nodes need to be shifted or the iterations limit has been reached */
+			/* iterate until no more nodes need to be shifted or the stop has been requested */
 			std::optional<ShiftTarget> nodeCurrent;
 			std::map<NodePoint, intptr_t> nodeOpen;
 			std::set<NodePoint> nodeClosed;
 			while (true) {
 				/* fix any encountered interlocks (will automatically straighten the graph) and compress the grid, as the
 				*	fixes leave rows behind which only the strand removal can collapse and which would skew the score */
-				fBuildFixInterlocks();
+				bool proceed = fBuildFixInterlocks(stopIteration);
 				fCompressGrid();
 
 				/* check if a new best graph has been encountered and reset all corresponding state */
 				if (!nodeCurrent.has_value() && fApplyBestGrid(bestGrid, bestScore) > 0)
 					nodeOpen.clear(), nodeClosed.clear(), nodeCurrent = std::nullopt;
 
-				/* check if another shift can be performed or if the limit has been reached */
-				if (iterations.has_value() && (*iterations)-- == 0)
+				/* check if the stop has been requested while fixing the interlocks,
+				*	in which case the current best grid can be returned */
+				if (!proceed)
 					break;
 
 				/* try to shift another node into a better place, in which

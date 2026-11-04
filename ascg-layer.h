@@ -149,6 +149,13 @@ namespace ascg::detail {
 		size_t index = 0;
 	};
 
+	/* Order the points of every layer to minimize the crossings between neighboring layers:
+	*	1.	construct the initial layers with the node in the first slot and the traversals passed through
+	*	2.	repeat: barycenter sweep down and up the layers, then shift every point to its crossing-minimal
+	*		position, until the order settles or repeats itself, while keeping the best order seen (given that
+	*		barycenter is not monotonic, the states are recorded to detect cycles and abort ocilating movements)
+	*	3.	run step 2 with the two-sided and the one-sided barycenter and keep the order with fewer crossings
+	*		(two-sided tends to win on dense graphs, one-sided on sparse graphs, ties keep two-sided) */
 	class LayerBuilder {
 	private:
 		enum class Direction : uint8_t {
@@ -207,7 +214,7 @@ namespace ascg::detail {
 			}
 		}
 		void fMovePoint(detail::Point& point, size_t to, size_t index) const {
-			/* update the referenced endpoints of the moved point to reference the new position */
+			/* notify the neighbors on the other layers of the point moving (the point itself is not updated) */
 			if (detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
 				fUpdatePrevPoint(pLayers[index - 1].points[traverse->prev], traverse->range, to);
 				fUpdateNextPoint(pLayers[index + 1].points[traverse->next], traverse->range, to);
@@ -406,7 +413,7 @@ namespace ascg::detail {
 			detail::Layer& layer = pLayers[index];
 			bool changed = false;
 
-			/* try to update the layer to minimize the crossings to the neighboring layers by shifting single nodes around */
+			/* try every point of the layer to be moved either anywhere to the left or right */
 			for (size_t i = 0; i < layer.points.size(); ++i) {
 				intptr_t current = 0, bestScore = 0;
 				size_t bestIndex = i;
@@ -448,7 +455,8 @@ namespace ascg::detail {
 		bool fReorderLayers(bool bidirectional) const {
 			bool changed = false;
 
-			/* perform a full sweep of the layers (either one-directional towards the previous layer or bi-directional) */
+			/* perform a full sweep by moving down the layers first and then back up (always adjust against
+			*	either the neighbors in both directions or the direction-based previous neighbors) */
 			for (size_t i = 1; i < pLayers.size(); ++i)
 				changed = (fReorderLayer(i, bidirectional ? Direction::bidirectional : Direction::backwards) || changed);
 			for (size_t i = pLayers.size() - 1; i > 0; --i)
@@ -476,7 +484,8 @@ namespace ascg::detail {
 			auto [hash, bestCrossings] = fMeasureLayers();
 			std::unordered_set<size_t> seen{ hash };
 
-			/* alternate layer reordering and shifting until the state settles for the given direction */
+			/* alternate reordering and shifting until the order settles or repeats itself (based on already seen hashes
+			*	of the layer states; terminates as the iteration step is a deterministic change in a finite order) */
 			while (true) {
 				bool changed = fReorderLayers(bidirectional);
 				changed = (fShiftLayers() || changed);
@@ -490,7 +499,7 @@ namespace ascg::detail {
 					break;
 			}
 
-			/* restore the current best layer state (will always at least be just as good) */
+			/* restore the current best layer state (will always be just as good as the stored state) */
 			pLayers = std::move(bestLayers);
 			return bestCrossings;
 		}

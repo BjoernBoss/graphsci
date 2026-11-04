@@ -21,17 +21,19 @@ namespace ascg {
 		std::vector<size_t> map;
 	};
 
-	/* arguments for builders finalize method */
-	struct ArgsBuilderFinalize {
-		/* upper bound for iterations to shift grid nodes around to find the best placement */
-		std::optional<size_t> gridBound = std::nullopt;
-	};
-
 	/* collect all edges of the graph and convert them to a final graph (ranges must not include
 	*	ascg::NoNode as value and must not be identical, i.e. a connection to the same node) */
 	class Builder {
 	private:
 		std::vector<detail::Range> pRanges;
+
+	private:
+		ascg::Graph fFinalize(ascg::IterationStop auto&& stopTest) const {
+			std::vector<detail::Layer> layers = detail::LayerBuilder{ pRanges }.build();
+			std::vector<detail::Row> grid = detail::GridBuilder{ layers }.build(stopTest);
+			auto [rows, map] = detail::Renderer{ layers, grid }.draw(ascg::NoNode);
+			return ascg::Graph{ .rows = std::move(rows), .map = std::move(map) };
+		}
 
 	public:
 		void connect(size_t a, size_t b) {
@@ -44,11 +46,11 @@ namespace ascg {
 			if (b < ascg::NoNode)
 				pRanges.push_back(detail::Range{ .first = a, .last = b });
 		}
-		ascg::Graph finalize(const ascg::ArgsBuilderFinalize& args = {}) const {
-			std::vector<detail::Layer> layers = detail::LayerBuilder{ pRanges }.build();
-			std::vector<detail::Row> grid = detail::GridBuilder{ layers }.build(args.gridBound);
-			auto [rows, map] = detail::Renderer{ layers, grid }.draw(ascg::NoNode);
-			return ascg::Graph{ .rows = std::move(rows), .map = std::move(map) };
+		ascg::Graph finalize() const {
+			return fFinalize([] { return false; });
+		}
+		ascg::Graph finalize(ascg::IterationStop auto&& stopTest) const {
+			return fFinalize(stopTest);
 		}
 	};
 }
