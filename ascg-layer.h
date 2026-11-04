@@ -68,7 +68,7 @@ namespace ascg::detail {
 		}
 		~Endpoints() {
 			if (pSize > 1)
-				free(pValue.list);
+				delete[] pValue.list;
 		}
 
 	public:
@@ -151,6 +151,11 @@ namespace ascg::detail {
 
 	class LayerBuilder {
 	private:
+		enum class Direction : uint8_t {
+			bidirectional,
+			forwards,
+			backwards
+		};
 		struct Opened {
 			size_t range = 0;
 			size_t start = 0;
@@ -249,6 +254,46 @@ namespace ascg::detail {
 				delta += swapEndpoints(ep.other, right.start);
 			return delta;
 		}
+		std::pair<size_t, size_t> fMeasureLayers() const {
+			size_t hash = 0xcbf29ce484222325, crossings = 0;
+
+			/* helper to add a value to the hashed list and to count the crossings */
+			const auto addHash = [&hash](size_t value) { hash = (hash ^ value) * 0x00000100000001b3; };
+			const auto addCrossings = [&crossings](const detail::Point& lPoint, size_t rOther) -> void {
+				if (const detail::Traverse* traverse = lPoint.isTraverse(); traverse != nullptr) {
+					if (rOther < traverse->prev)
+						++crossings;
+				}
+				else for (const detail::Endpoint& ep : lPoint.node().end) {
+					if (rOther < ep.other)
+						++crossings;
+				}
+			};
+
+			/* hash the order of the points of all layers (non-standard compliant
+			*	version of fnv-1a) and compute the crossings count of the layers */
+			for (const detail::Layer& layer : pLayers) {
+				for (size_t i = 0; i < layer.points.size(); ++i) {
+					const detail::Point& point = layer.points[i];
+
+					/* extend the hash (use the ranges + 1 to identify traversals and 0 for the node) */
+					addHash(point.isTraverse() != nullptr ? point.traverse().range + 1 : 0);;
+
+					/* iterate over the upcoming points and compute the crossings with this point */
+					for (size_t k = i + 1; k < layer.points.size(); ++k) {
+						const detail::Point& other = layer.points[k];
+						if (const detail::Traverse* traverse = other.isTraverse(); traverse != nullptr)
+							addCrossings(point, traverse->prev);
+						else for (const detail::Endpoint& ep : other.node().end)
+							addCrossings(point, ep.other);
+					}
+				}
+
+				/* add the layer delimiter (max-int) to the hash */
+				addHash(std::numeric_limits<size_t>::max());
+			}
+			return { hash, crossings };
+		}
 
 	private:
 		void fConstructLayers() const {
@@ -309,48 +354,52 @@ namespace ascg::detail {
 				}
 			}
 		}
-		bool fOptimizeLayer(size_t index) const {
-			std::set<Preferred> preferred;
+		bool fReorderLayer(size_t index, Direction direction) const {
 			detail::Layer& layer = pLayers[index];
+			std::vector<Preferred> preferred;
+			preferred.reserve(layer.points.size());
 
-			/* calculate the average position of each point based on its connected neighbors,
-			*	and sort the points new by this given target position (barycenter method) */
-			bool changed = false;
+			/* calculate the average position of each point based on its connected neighbors
+			*	and sort the points into the preferred positions (barycenter method) */
 			for (size_t i = 0; i < layer.points.size(); ++i) {
-				float average = 0.0f;
+				float others = 0.0f;
+				size_t count = 0;
 
-				/* compute the average position of the endpoints to the current point */
+				/* compute the average position of the endpoints of the current point (a point
+				*	without any neighbors in the given direction keeps the current position) */
 				const detail::Point& pt = layer.points[i];
-				if (const detail::Traverse* traverse = pt.isTraverse(); traverse != nullptr)
-					average = static_cast<float>(traverse->prev + traverse->next) / 2.0f;
+				if (const detail::Traverse* traverse = pt.isTraverse(); traverse != nullptr) {
+					if (direction != Direction::forwards)
+						others += static_cast<float>(traverse->prev), ++count;
+					if (direction != Direction::backwards)
+						others += static_cast<float>(traverse->next), ++count;
+				}
 				else {
 					const detail::Node& node = pt.node();
-					for (const detail::Endpoint& ep : node.start)
-						average += static_cast<float>(ep.other);
-					for (const detail::Endpoint& ep : node.end)
-						average += static_cast<float>(ep.other);
-					average /= static_cast<float>(node.start.size() + node.end.size());
+					if (direction != Direction::forwards) for (const detail::Endpoint& ep : node.end)
+						others += static_cast<float>(ep.other), ++count;
+					if (direction != Direction::backwards) for (const detail::Endpoint& ep : node.start)
+						others += static_cast<float>(ep.other), ++count;
 				}
-
-				/* insert the new preferred position into the set and check if the position is
-				*	not at the end, in which case it must prefer to be placed somewhere else */
-				std::set<Preferred>::iterator it = preferred.insert(Preferred{ .average = average, .index = i }).first;
-				if (++it != preferred.end())
-					changed = true;
+				preferred.push_back(Preferred{ .average = (count == 0 ? static_cast<float>(i) : others / static_cast<float>(count)), .index = i });
 			}
 
-			/* check if the layer seems to have settled down */
+			/* sort the points by their preferred position (equal scores will preserve
+			*	their current position) and check if the layer changes at all */
+			std::sort(preferred.begin(), preferred.end());
+			bool changed = false;
+			for (size_t i = 0; i < preferred.size() && !changed; ++i)
+				changed = (preferred[i].index != i);
 			if (!changed)
 				return false;
 
 			/* construct the new layer based on the new indices */
 			std::vector<detail::Point> oldPoints{ layer.points.size(), detail::Point{} };
 			std::swap(oldPoints, layer.points);
-			size_t next = 0;
-			for (auto it = preferred.begin(); it != preferred.end(); ++it) {
-				if (it->index != next)
-					fMovePoint(oldPoints[it->index], next, index);
-				layer.points[next++] = std::move(oldPoints[it->index]);
+			for (size_t i = 0; i < preferred.size(); ++i) {
+				if (preferred[i].index != i)
+					fMovePoint(oldPoints[preferred[i].index], i, index);
+				layer.points[i] = std::move(oldPoints[preferred[i].index]);
 			}
 			return true;
 		}
@@ -397,36 +446,54 @@ namespace ascg::detail {
 		}
 
 	private:
-		size_t fCountCrossings() const {
-			size_t count = 0;
+		bool fReorderLayers(bool bidirectional) const {
+			bool changed = false;
 
-			for (size_t i = 1; i < pLayers.size(); ++i) {
-				const detail::Layer& layer = pLayers[i];
+			/* perform a full sweep of the layers (either one-directional towards the previous layer or bi-directional) */
+			for (size_t i = 1; i < pLayers.size(); ++i)
+				changed = (fReorderLayer(i, bidirectional ? Direction::bidirectional : Direction::backwards) || changed);
+			for (size_t i = pLayers.size() - 1; i > 0; --i)
+				changed = (fReorderLayer(i - 1, bidirectional ? Direction::bidirectional : Direction::forwards) || changed);
+			return changed;
+		}
+		bool fShiftLayers() const {
+			bool changed = false;
 
-				for (size_t j = 0; j < layer.points.size(); ++j) {
-					const detail::Point& point = layer.points[j];
-					const auto testAgainstPoint = [&point, &count](size_t index) -> void {
-						if (const detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
-							if (index < traverse->prev)
-								++count;
-							return;
-						}
-						for (const detail::Endpoint& ep : point.node().end) {
-							if (index < ep.other)
-								++count;
-						}
-					};
-
-					for (size_t k = j + 1; k < layer.points.size(); ++k) {
-						const detail::Point& other = layer.points[k];
-						if (const detail::Traverse* traverse = other.isTraverse(); traverse != nullptr)
-							testAgainstPoint(traverse->prev);
-						else for (const detail::Endpoint& ep : other.node().end)
-							testAgainstPoint(ep.other);
-					}
-				}
+			/* try to reduce the crossings by shifting the nodes within the
+			*	layers to reduce crossings to the immediate neighbor layers */
+			for (bool dirty = true; dirty;) {
+				dirty = false;
+				for (size_t i = 0; i < pLayers.size(); ++i)
+					dirty = (fShiftLayer(i) || dirty);
+				changed = (changed || dirty);
 			}
-			return count;
+			return changed;
+		}
+		size_t fOptimizeLayers(bool bidirectional) const {
+			std::vector<detail::Layer> bestLayers = pLayers;
+
+			/* measure the current layers to keep track of the best
+			*	version and to detect cycles (barycenter is not monotonic) */
+			auto [hash, bestCrossings] = fMeasureLayers();
+			std::unordered_set<size_t> seen{ hash };
+
+			/* alternate layer reordering and shifting until the state settles for the given direction */
+			while (true) {
+				bool changed = fReorderLayers(bidirectional);
+				changed = (fShiftLayers() || changed);
+
+				/* check if the new state is the best state so far and update
+				*	the seen list to determine if the layers have settled */
+				auto [hash, crossings] = fMeasureLayers();
+				if (crossings < bestCrossings)
+					bestCrossings = crossings, bestLayers = pLayers;
+				if (!changed || !seen.insert(hash).second)
+					break;
+			}
+
+			/* restore the current best layer state (will always at least be just as good) */
+			pLayers = std::move(bestLayers);
+			return bestCrossings;
 		}
 
 	public:
@@ -437,29 +504,13 @@ namespace ascg::detail {
 				return {};
 			fConstructLayers();
 
-			str::PrintLn("Crossings: ", fCountCrossings());
-
-			/* perform the initial ordering by sweeping the barycenter method down and up the layers */
-			if (pLayers.size() > 2) for (size_t j = 0; j < 16; ++j) {
-				for (size_t i = 1; i < pLayers.size(); ++i) {
-					fOptimizeLayer(i);
-					str::PrintLn("Crossings: ", fCountCrossings());
-				}
-				for (size_t i = pLayers.size() - 1; i > 0; --i) {
-					fOptimizeLayer(i - 1);
-					str::PrintLn("Crossings: ", fCountCrossings());
-				}
-			}
-
-			/* try to reduce the crossings by shifting the nodes within the
-			*	layers to reduce crossings to the immediate neighbor layers */
-			for (bool changed = false;; changed = false) {
-				for (size_t i = 0; i < pLayers.size(); ++i)
-					changed = (fShiftLayer(i) || changed);
-				if (!changed)
-					break;
-				str::PrintLn("Crossings: ", fCountCrossings());
-			}
+			/* optimize the layers by trying to optimize uni-directional and bi-directional and then
+			*	picking the better final result (depending on the graph density, one or the other is better) */
+			std::vector<detail::Layer> others{ pLayers };
+			size_t bidirectional = fOptimizeLayers(true);
+			std::swap(pLayers, others);
+			if (fOptimizeLayers(false) >= bidirectional)
+				pLayers = std::move(others);
 
 			/* return the complete generated layers from the internal state */
 			std::vector<detail::Layer> layers;
