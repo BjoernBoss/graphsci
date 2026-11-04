@@ -18,13 +18,12 @@
 /*
 *	Integrate proper metric for grid complexity? Or have it just use a 'process' method so the user can decide when to stop?
 *
+*	Add comments on LayerBuilder and GraphBuilder how they work
+*
 *	cleanup in includes
 *	add self-loops?/double-edges?/directions?
 *
-*	finish layer-builder (cleanup)
-*	update detail::LayoutGraph to default offset preferred positions to be centered
-*
-*	add bounds (like: max node-shifting iterations/max...) to conditionally ensure algorithm limits*
+*	add bounds (like: max node-shifting iterations/max...) to conditionally ensure algorithm limits
 */
 #include <ustring/ustring.h>
 
@@ -91,5 +90,19 @@ namespace ascg::detail {
 	struct Range {
 		size_t first = 0;
 		size_t last = 0;
+	};
+
+	/* non-standard compliant version of fnv-1a, which does not just hash over single bytes */
+	struct Hasher {
+	private:
+		size_t pHash = 0xcbf29ce484222325;
+
+	public:
+		void add(size_t value) {
+			pHash = (pHash ^ value) * 0x00000100000001b3;
+		}
+		size_t digest() const {
+			return pHash;
+		}
 	};
 }

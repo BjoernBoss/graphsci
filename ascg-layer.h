@@ -218,7 +218,7 @@ namespace ascg::detail {
 			for (detail::Endpoint& ep : point.node().start)
 				fUpdateNextPoint(pLayers[index + 1].points[ep.other], ep.range, to);
 		}
-		intptr_t fGetSwapDelta(size_t index, const detail::Point& l, const detail::Point& r) const {
+		intptr_t fGetSwapDelta(const detail::Point& l, const detail::Point& r) const {
 			/* helper to compute the crossing delta between two single endpoints or a list of endpoints */
 			const auto swapPair = [](size_t lOther, size_t rOther) -> intptr_t {
 				if (lOther == rOther)
@@ -255,10 +255,10 @@ namespace ascg::detail {
 			return delta;
 		}
 		std::pair<size_t, size_t> fMeasureLayers() const {
-			size_t hash = 0xcbf29ce484222325, crossings = 0;
+			detail::Hasher hasher;
+			size_t crossings = 0;
 
-			/* helper to add a value to the hashed list and to count the crossings */
-			const auto addHash = [&hash](size_t value) { hash = (hash ^ value) * 0x00000100000001b3; };
+			/* helper to count the crossings */
 			const auto addCrossings = [&crossings](const detail::Point& lPoint, size_t rOther) -> void {
 				if (const detail::Traverse* traverse = lPoint.isTraverse(); traverse != nullptr) {
 					if (rOther < traverse->prev)
@@ -270,14 +270,13 @@ namespace ascg::detail {
 				}
 			};
 
-			/* hash the order of the points of all layers (non-standard compliant
-			*	version of fnv-1a) and compute the crossings count of the layers */
+			/* hash the order of the points of all layers and compute the crossings count of the layers */
 			for (const detail::Layer& layer : pLayers) {
 				for (size_t i = 0; i < layer.points.size(); ++i) {
 					const detail::Point& point = layer.points[i];
 
 					/* extend the hash (use the ranges + 1 to identify traversals and 0 for the node) */
-					addHash(point.isTraverse() != nullptr ? point.traverse().range + 1 : 0);;
+					hasher.add(point.isTraverse() != nullptr ? point.traverse().range + 1 : 0);
 
 					/* iterate over the upcoming points and compute the crossings with this point */
 					for (size_t k = i + 1; k < layer.points.size(); ++k) {
@@ -290,9 +289,9 @@ namespace ascg::detail {
 				}
 
 				/* add the layer delimiter (max-int) to the hash */
-				addHash(std::numeric_limits<size_t>::max());
+				hasher.add(std::numeric_limits<size_t>::max());
 			}
-			return { hash, crossings };
+			return { hasher.digest(), crossings };
 		}
 
 	private:
@@ -416,13 +415,13 @@ namespace ascg::detail {
 				*	with any other neighbors are not affected by this, only the edges of the two points can be
 				*	evaluated; provided the neighbors inbetween the points were already included into the calculation) */
 				for (size_t j = i + 1; j < layer.points.size(); ++j) {
-					current += fGetSwapDelta(index, layer.points[i], layer.points[j]);
+					current += fGetSwapDelta(layer.points[i], layer.points[j]);
 					if (current < bestScore)
 						bestScore = current, bestIndex = j;
 				}
 				current = 0;
 				for (size_t j = i; j > 0; --j) {
-					current += fGetSwapDelta(index, layer.points[j - 1], layer.points[i]);
+					current += fGetSwapDelta(layer.points[j - 1], layer.points[i]);
 					if (current < bestScore)
 						bestScore = current, bestIndex = j - 1;
 				}

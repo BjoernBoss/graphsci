@@ -5,6 +5,7 @@
 
 namespace ascg::detail {
 	static constexpr size_t SlotUnused = std::numeric_limits<size_t>::max();
+	static constexpr size_t InterlockWindow = 2;
 
 	enum class CellKind : uint8_t {
 		empty,
@@ -186,6 +187,7 @@ namespace ascg::detail {
 	private:
 		const std::vector<detail::Layer>& pLayers;
 		mutable std::vector<detail::Row> pGrid;
+		mutable std::unordered_set<size_t> pFailedFixes;
 
 	public:
 		GridBuilder(const std::vector<detail::Layer>& layers) : pLayers{ layers } {}
@@ -203,7 +205,7 @@ namespace ascg::detail {
 			}
 			return score;
 		}
-		bool fApplyBestGrid(std::vector<detail::Row>& bestGrid, GridScore& bestScore) const {
+		intptr_t fApplyBestGrid(std::vector<detail::Row>& bestGrid, GridScore& bestScore) const {
 			GridScore score = fMeasureGrid();
 
 			/* compare the grid score to determine if a change has occurred */
@@ -222,7 +224,25 @@ namespace ascg::detail {
 				bestGrid = pGrid, bestScore = score;
 			else if (cmp < 0)
 				pGrid = bestGrid;
-			return (cmp > 0);
+			return cmp;
+		}
+		size_t fMeasureInterlock(size_t x, size_t y, size_t xOther, size_t yOther, bool leftwards) const {
+			detail::Hasher hasher;
+
+			/* compute the bounding box of the interlocked indentation including the corresponding overlap-window */
+			size_t yLo = std::min<size_t>(y, yOther), yHi = std::min<size_t>(std::max<size_t>(y, yOther) + detail::InterlockWindow, pGrid.size() - 1);
+			size_t xLo = std::min<size_t>(x, xOther), xHi = std::min<size_t>(std::max<size_t>(x, xOther) + detail::InterlockWindow, pGrid[0].size() - 1);
+			yLo = (yLo > detail::InterlockWindow ? yLo - detail::InterlockWindow : 0);
+			xLo = (xLo > detail::InterlockWindow ? xLo - detail::InterlockWindow : 0);
+
+			/* hash the cells in the bounding box (including the direction) to
+			*	identify the state again and prevent repeated interlock-fixing */
+			hasher.add(leftwards ? 0x01 : 0x00);
+			for (size_t i = yLo; i <= yHi; ++i) {
+				for (size_t j = xLo; j <= xHi; ++j)
+					hasher.add(static_cast<size_t>(pGrid[i][j].kind));
+			}
+			return hasher.digest();
 		}
 
 	private:
@@ -612,6 +632,7 @@ namespace ascg::detail {
 		}
 		void fConstructGrid() const {
 			pGrid.clear();
+			pFailedFixes.clear();
 
 			/* compute the minimum width to give to the graph */
 			size_t totalWidth = 0;
@@ -995,7 +1016,7 @@ namespace ascg::detail {
 			pGrid[yDetour][xSpacer].kind = detail::Cell{ kindDetour }.mirrorFull();
 			return true;
 		}
-		bool fFixInterlocks(bool leftwards, GridPoint& point) const {
+		bool fFixInterlocks(bool leftwards, GridPoint& point, size_t& appliedInterlockHash) const {
 			/* find the next corner to pursue (iterate until one has been found or all have been checked) */
 			for (; point.y < pGrid.size(); point.x = 0, ++point.y) {
 				detail::Row& row = pGrid[point.y];
@@ -1029,6 +1050,11 @@ namespace ascg::detail {
 						yOtherCorner = i;
 					}
 					if (blockedTransition)
+						continue;
+
+					/* check if the current interlock has already been marked as failed fix and can therefore be ignored */
+					appliedInterlockHash = fMeasureInterlock(point.x, point.y, xOther, yOther, leftwards);
+					if (pFailedFixes.contains(appliedInterlockHash))
 						continue;
 
 					/* check if no corner has been found, which can only be the case if the blocker spans the
@@ -1487,15 +1513,19 @@ namespace ascg::detail {
 				/* forward-iterate the interlock fixing into the given
 				*	direction until one results in a positive outcome */
 				GridPoint point{};
-				while (fFixInterlocks(leftwards, point)) {
+				size_t fixInterlockHash = 0;
+				while (fFixInterlocks(leftwards, point, fixInterlockHash)) {
 					/* first straighten the graph into the given direction, in order for any fix-changes
 					*	to propagate properly, and then perform a general straightening and shrinking */
 					fBuildStraighten(leftwards);
 
-					/* advance the point and check if a new best grid has been reached and reset the state accordingly */
+					/* advance the point and check if a new best grid has been reached and reset the state accordingly
+					*	(if the fix worsens the grid, preserve the interlock-identification to prevent repeated fixing) */
 					++point.x;
-					if (fApplyBestGrid(bestGrid, bestScore))
+					if (intptr_t cmp = fApplyBestGrid(bestGrid, bestScore); cmp > 0)
 						point = { .x = 0, .y = 0 }, dirty = true;
+					else if (cmp < 0)
+						pFailedFixes.insert(fixInterlockHash);
 				}
 
 				/* check if the fixing results in changes, in which
@@ -1532,7 +1562,7 @@ namespace ascg::detail {
 				fCompressGrid();
 
 				/* check if a new best graph has been encountered and reset all corresponding state */
-				if (!nodeCurrent.has_value() && fApplyBestGrid(bestGrid, bestScore))
+				if (!nodeCurrent.has_value() && fApplyBestGrid(bestGrid, bestScore) > 0)
 					nodeOpen.clear(), nodeClosed.clear(), nodeCurrent = std::nullopt;
 
 				/* check if another shift can be performed or if the limit has been reached */
