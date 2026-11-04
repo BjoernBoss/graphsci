@@ -25,9 +25,6 @@ namespace ascg {
 	struct ArgsBuilderFinalize {
 		/* upper bound for iterations to shift grid nodes around to find the best placement */
 		std::optional<size_t> gridBound = std::nullopt;
-
-		/* speed up the node placement by reodering shift tries, which may result in worse layouts */
-		bool gridFastNodes = false;
 	};
 
 	/* collect all edges of the graph and convert them to a final graph (ranges must not include
@@ -49,7 +46,7 @@ namespace ascg {
 		}
 		ascg::Graph finalize(const ascg::ArgsBuilderFinalize& args = {}) const {
 			std::vector<detail::Layer> layers = detail::LayerBuilder{ pRanges }.build();
-			std::vector<detail::Row> grid = detail::GridBuilder{ layers }.build(args.gridBound, args.gridFastNodes);
+			std::vector<detail::Row> grid = detail::GridBuilder{ layers }.build(args.gridBound);
 			auto [rows, map] = detail::Renderer{ layers, grid }.draw(ascg::NoNode);
 			return ascg::Graph{ .rows = std::move(rows), .map = std::move(map) };
 		}

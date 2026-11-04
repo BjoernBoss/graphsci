@@ -1327,7 +1327,7 @@ namespace ascg::detail {
 				return 1;
 			return 0;
 		}
-		bool fShiftNode(std::map<NodePoint, intptr_t>& open, std::set<NodePoint>& closed, std::optional<ShiftTarget>& current, bool fastNodeShift) const {
+		bool fShiftNode(std::map<NodePoint, intptr_t>& open, std::set<NodePoint>& closed, std::optional<ShiftTarget>& current) const {
 			/* node placement is identified by its index and first cell position, as for each grid, the
 			*	rows may be slightly shifted, but the overall starting horizontal position can be expected
 			*	to be consistent, as any shifts in it are assumed to also invalidate the grid score */
@@ -1366,20 +1366,12 @@ namespace ascg::detail {
 						++(shift < 0 ? leftScore : rightScore);
 				}
 
-				/* insert the potential moves into the open set and update the scores accordingly (in fast
-				*	mode, consider if the neighbor is empty, in which case fewer moves might be pursued) */
-				if (leftCheck && leftScore > 0) {
-					intptr_t spaceScore = 0;
-					if (fastNodeShift)
-						spaceScore = static_cast<intptr_t>(row[first - 1].isEmpty() ? pGrid.size() * 2 : 0);
-					open.insert({ leftPoint, leftScore - rightScore - emptyScore + spaceScore });
-				}
-				if (rightCheck && rightScore > 0) {
-					intptr_t spaceScore = 0;
-					if (fastNodeShift)
-						spaceScore = static_cast<intptr_t>(row[last + 1].isEmpty() ? pGrid.size() * 2 : 0);
-					open.insert({ rightPoint, rightScore - leftScore - emptyScore + spaceScore });
-				}
+				/* insert the potential moves into the open set and update the scores
+				*	accordingly (grid does not benefit from preferring free neighbor slots) */
+				if (leftCheck && leftScore > 0)
+					open.insert({ leftPoint, leftScore - rightScore - emptyScore });
+				if (rightCheck && rightScore > 0)
+					open.insert({ rightPoint, rightScore - leftScore - emptyScore });
 			}
 
 			/* helper to evaluate a given nodepoint */
@@ -1539,7 +1531,7 @@ namespace ascg::detail {
 		}
 
 	public:
-		std::vector<detail::Row> build(std::optional<size_t> iterations, bool fastNodeShift) const {
+		std::vector<detail::Row> build(std::optional<size_t> iterations) const {
 			/* check if the layers are empty, in which case nothing needs to be done, and
 			*	otherwise create the initial grid and straighten it (cannot be empty anymore) */
 			if (pLayers.empty())
@@ -1571,7 +1563,7 @@ namespace ascg::detail {
 
 				/* try to shift another node into a better place, in which
 				*	case the straightening and measuring can be repeated */
-				if (!fShiftNode(nodeOpen, nodeClosed, nodeCurrent, fastNodeShift))
+				if (!fShiftNode(nodeOpen, nodeClosed, nodeCurrent))
 					break;
 				fBuildStraighten(true);
 			}
