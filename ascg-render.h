@@ -34,6 +34,10 @@ namespace ascg::detail {
 				/* convert the cell itself to a character */
 				if (cell.kind == detail::CellKind::node)
 					line.push_back('#');
+				else if (cell.kind == detail::CellKind::arrowTop)
+					line.push_back('A');
+				else if (cell.kind == detail::CellKind::arrowBottom)
+					line.push_back('V');
 				else if (cell.lineVertical())
 					line.push_back('|');
 				else if (cell.cornerTop())

@@ -8,8 +8,9 @@ namespace ascg {
 	static constexpr size_t NoNode = std::numeric_limits<size_t>::max();
 
 	/*
-	*	Describes a layered graph made up of: # | - , '
-	*	The graph is bidirectional, and cannot contain self-loops.
+	*	Describes a layered graph made up of: # | - , ' A V
+	*	Edges are undirected, unless connected as directed, in which case an arrow-head (A or V) is drawn at the target node.
+	*	The graph cannot contain self-loops.
 	*	The the layouting will select an ordering of the transitions and lay it out as ascii art.
 	*	The ordering of the nodes from top to bottom will not be modified and will be used as provided.
 	*/
@@ -30,21 +31,19 @@ namespace ascg {
 	private:
 		ascg::Graph fFinalize(ascg::IterationStop auto&& stopTest) const {
 			std::vector<detail::Layer> layers = detail::LayerBuilder{ pRanges }.build();
-			std::vector<detail::Row> grid = detail::GridBuilder{ layers }.build(stopTest);
+			std::vector<detail::Row> grid = detail::GridBuilder{ pRanges, layers }.build(stopTest);
 			auto [rows, map] = detail::Renderer{ layers, grid }.draw(ascg::NoNode);
 			return ascg::Graph{ .rows = std::move(rows), .map = std::move(map) };
 		}
 
 	public:
-		void connect(size_t a, size_t b) {
+		void connect(size_t a, size_t b, bool aHead = false, bool bHead = false) {
 			/* ensure that the nodes are well ordered and considered valid */
 			if (a > b)
-				std::swap(a, b);
-			else if (a == b)
+				std::swap(a, b), std::swap(aHead, bHead);
+			if (a == b || b >= ascg::NoNode)
 				return;
-
-			if (b < ascg::NoNode)
-				pRanges.push_back(detail::Range{ .first = a, .last = b });
+			pRanges.push_back(detail::Range{ .first = a, .last = b, .headFirst = aHead, .headLast = bHead });
 		}
 		ascg::Graph finalize() const {
 			return fFinalize([] { return false; });

@@ -57,6 +57,8 @@ namespace ascg {
 		struct Range {
 			size_t first = 0;
 			size_t last = 0;
+			bool headFirst = false;
+			bool headLast = false;
 		};
 
 		/* non-standard compliant version of fnv-1a, which does not just hash over single bytes */
