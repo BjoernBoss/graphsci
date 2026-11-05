@@ -185,26 +185,26 @@ namespace ascg::detail {
 				};
 			}
 		};
-		struct ChangeCorner {
+		struct TrackedRect {
 			GridRect rect;
 			size_t age = 0;
+		};
+		struct StraightenCorner {
+			TrackedRect tracked;
 			size_t x = 0;
 		};
-		struct ChangeRow {
-			std::vector<ChangeCorner> corners;
-			GridRect rect;
-			size_t age = 0;
-		};
-		struct ChangeCache {
-			std::vector<ChangeRow> rows;
-			std::vector<GridRect> changes;
+		struct StraightenRow {
+			TrackedRect tracked;
+			std::vector<StraightenCorner> corners;
 		};
 
 	private:
 		const std::vector<detail::Range>& pRanges;
 		const std::vector<detail::Layer>& pLayers;
-		mutable std::vector<detail::Row> pGrid;
-		mutable std::unordered_set<size_t> pFailedFixes;
+		std::vector<detail::Row> pGrid;
+		std::unordered_set<size_t> pFailedFixes;
+		std::vector<StraightenRow> pStraightenRows;
+		std::vector<GridRect> pStraightenList;
 
 	public:
 		GridBuilder(const std::vector<detail::Range>& ranges, const std::vector<detail::Layer>& layers) : pRanges{ ranges }, pLayers{ layers } {}
@@ -222,7 +222,7 @@ namespace ascg::detail {
 			}
 			return score;
 		}
-		intptr_t fApplyBestGrid(std::vector<detail::Row>& bestGrid, GridScore& bestScore) const {
+		intptr_t fApplyBestGrid(std::vector<detail::Row>& bestGrid, GridScore& bestScore) {
 			GridScore score = fMeasureGrid();
 
 			/* compare the grid score to determine if a change has occurred */
@@ -267,7 +267,7 @@ namespace ascg::detail {
 			for (size_t i = begin; i < end; ++i)
 				row.push_back(detail::Cell{ slice[i].used ? detail::CellKind::vertical : detail::CellKind::empty });
 		}
-		size_t fFlushArrows(size_t where, std::vector<Slot>& slice, bool top) const {
+		size_t fFlushArrows(size_t where, std::vector<Slot>& slice, bool top) {
 			/* check if the slice contains any errors in the given direction and clear the flags
 			*	(caller is responsible for ensuring that the node is the immediate neighbor) */
 			bool hasArrows = false;
@@ -295,7 +295,7 @@ namespace ascg::detail {
 			}
 			return where;
 		}
-		size_t fInsertRotation(std::vector<Slot>& slice, size_t begin, size_t end, size_t target, size_t where) const {
+		size_t fInsertRotation(std::vector<Slot>& slice, size_t begin, size_t end, size_t target, size_t where) {
 			/* add the rotation of the range [begin, end) with begin finally being placed at target */
 			if (begin == target) return where;
 			bool leftwards = (target < begin);
@@ -328,7 +328,7 @@ namespace ascg::detail {
 			}
 			return where;
 		}
-		size_t fInsertSliceCorrections(std::vector<Slot>& slice, size_t where) const {
+		size_t fInsertSliceCorrections(std::vector<Slot>& slice, size_t where) {
 			/* flush all of the initial arrows */
 			where = fFlushArrows(where, slice, true);
 
@@ -361,7 +361,39 @@ namespace ascg::detail {
 			/* flush all of the bottom arrows */
 			return fFlushArrows(where, slice, false);
 		}
-		std::pair<size_t, size_t> fCreateEmptyCell(size_t x, size_t y, bool leftwards) const {
+		void fInsertNullRow(size_t index) {
+			detail::Row& row = *pGrid.emplace(pGrid.begin() + index);
+			detail::Row& prev = pGrid[index - 1];
+			detail::Row& next = pGrid[index + 1];
+			row.reserve(prev.size());
+
+			/* insert a null row at index, which only consists of vertical edges or empty space
+			*	(arrow-heads potentially need to be moved from the neighbors into this null-row) */
+			for (size_t i = 0; i < prev.size(); ++i) {
+				if (prev[i].kind == detail::CellKind::arrowBottom) {
+					row.push_back(detail::Cell{ prev[i].kind });
+					prev[i].kind = detail::CellKind::vertical;
+				}
+				else if (next[i].kind == detail::CellKind::arrowTop) {
+					row.push_back(detail::Cell{ next[i].kind });
+					next[i].kind = detail::CellKind::vertical;
+				}
+				else
+					row.push_back(detail::Cell{ (prev[i].anyBottom() || next[i].anyTop()) ? detail::CellKind::vertical : detail::CellKind::empty });
+			}
+		}
+		void fInsertEmptyColumn(bool leftSide, auto&... values) {
+			size_t where = (leftSide ? 0 : pGrid[0].size());
+
+			/* insert the new empty cells */
+			for (size_t i = 0; i < pGrid.size(); ++i)
+				pGrid[i].insert(pGrid[i].begin() + where, detail::Cell{});
+
+			/* apply the shift to all values */
+			if (leftSide)
+				((values += 1), ...);
+		}
+		std::pair<size_t, size_t> fCreateEmptyCell(size_t x, size_t y, bool leftwards) {
 			if (pGrid[y][x].isEmpty())
 				return{ x, y };
 
@@ -464,38 +496,6 @@ namespace ascg::detail {
 			}
 			return{ x, y };
 		}
-		void fInsertNullRow(size_t index) const {
-			detail::Row& row = *pGrid.emplace(pGrid.begin() + index);
-			detail::Row& prev = pGrid[index - 1];
-			detail::Row& next = pGrid[index + 1];
-			row.reserve(prev.size());
-
-			/* insert a null row at index, which only consists of vertical edges or empty space
-			*	(arrow-heads potentially need to be moved from the neighbors into this null-row) */
-			for (size_t i = 0; i < prev.size(); ++i) {
-				if (prev[i].kind == detail::CellKind::arrowBottom) {
-					row.push_back(detail::Cell{ prev[i].kind });
-					prev[i].kind = detail::CellKind::vertical;
-				}
-				else if (next[i].kind == detail::CellKind::arrowTop) {
-					row.push_back(detail::Cell{ next[i].kind });
-					next[i].kind = detail::CellKind::vertical;
-				}
-				else
-					row.push_back(detail::Cell{ (prev[i].anyBottom() || next[i].anyTop()) ? detail::CellKind::vertical : detail::CellKind::empty });
-			}
-		}
-		void fInsertEmptyColumn(bool leftSide, auto&... values) const {
-			size_t where = (leftSide ? 0 : pGrid[0].size());
-
-			/* insert the new empty cells */
-			for (size_t i = 0; i < pGrid.size(); ++i)
-				pGrid[i].insert(pGrid[i].begin() + where, detail::Cell{});
-
-			/* apply the shift to all values */
-			if (leftSide)
-				((values += 1), ...);
-		}
 
 	private:
 		std::map<size_t, size_t> fSetupNodeMap(size_t index, size_t width) const {
@@ -548,7 +548,7 @@ namespace ascg::detail {
 				slot += shift;
 			return out;
 		}
-		std::vector<Slot> fConstructNode(size_t index, size_t width, std::map<size_t, size_t>& mapping) const {
+		std::vector<Slot> fConstructNode(size_t index, size_t width, std::map<size_t, size_t>& mapping) {
 			const detail::Layer& layer = pLayers[index];
 
 			/* setup the initial slice and row */
@@ -593,7 +593,7 @@ namespace ascg::detail {
 			mapping = std::move(upcoming);
 			return slice;
 		}
-		void fConstructAddCrossing(std::vector<Slot>& slice, size_t index, size_t target) const {
+		void fConstructAddCrossing(std::vector<Slot>& slice, size_t index, size_t target) {
 			detail::Row& row = pGrid.emplace_back();
 			row.reserve(pGrid[0].size());
 			bool leftwards = (target < index);
@@ -611,7 +611,7 @@ namespace ascg::detail {
 			fFillTraversals(row, slice, std::max<size_t>(index, target) + 1, slice.size());
 			std::swap(slice[index], slice[target]);
 		}
-		void fConstructTransitions(std::vector<Slot>& slice) const {
+		void fConstructTransitions(std::vector<Slot>& slice) {
 			size_t numberOfRows = pGrid.size();
 
 			/* flush all of the initial arrows (before any crossings are inserted or applied) */
@@ -722,7 +722,7 @@ namespace ascg::detail {
 				fFillTraversals(row, slice, 0, slice.size());
 			}
 		}
-		void fConstructGrid() const {
+		void fConstructGrid() {
 			pGrid.clear();
 			pFailedFixes.clear();
 
@@ -851,20 +851,23 @@ namespace ascg::detail {
 			}
 			return true;
 		}
-		bool fChangeCheckOutdated(const GridRect& rect, size_t age, const ChangeCache& changes) const {
+		bool fChangeCheckOutdated(TrackedRect& tracked) const {
 			/* check if the rectangle itself is not yet valid */
-			if (rect.empty())
+			if (tracked.rect.empty())
 				return true;
 
 			/* check if any changes since the last check overlap with the testing rectangle */
-			for (size_t i = age; i < changes.changes.size(); ++i) {
-				if (changes.changes[i].overlap(rect))
+			for (size_t i = tracked.age; i < pStraightenList.size(); ++i) {
+				if (pStraightenList[i].overlap(tracked.rect))
 					return true;
 			}
+
+			/* update the age to indicate that the tracked rectangle is still up to date */
+			tracked.age = pStraightenList.size();
 			return false;
 		}
-		void fChangeUpdateRow(size_t y, std::optional<size_t> added, ChangeCache& changes) const {
-			std::vector<ChangeCorner>& corners = changes.rows[y].corners;
+		void fChangeUpdateRow(size_t y, std::optional<size_t> added) {
+			std::vector<StraightenCorner>& corners = pStraightenRows[y].corners;
 			detail::Row& row = pGrid[y];
 			size_t size = 0;
 
@@ -883,26 +886,25 @@ namespace ascg::detail {
 			/* insert the new corner into the sorted list (needs to be sorted in order to continue sweep properly) */
 			if (!added.has_value())
 				return;
-			auto it = std::lower_bound(corners.begin(), corners.end(), *added, [](const ChangeCorner& c, size_t x) { return (c.x < x); });
-			corners.insert(it, ChangeCorner{ .rect = {}, .x = *added });
+			auto it = std::lower_bound(corners.begin(), corners.end(), *added, [](const StraightenCorner& c, size_t x) { return (c.x < x); });
+			corners.insert(it, StraightenCorner{ .tracked = {}, .x = *added });
 		}
-		bool fStraightenGrid(Alignment align, size_t halfGrid, ChangeCache& changes) const {
+		bool fStraightenGrid(Alignment align, size_t halfGrid) {
 			bool dirty = false;
 
 			/* find the next corner to pursue (iterate until all possible corners have been evaluated and return a change to
 			*	indicate another sweep; only re-check corners, which might have become unblocked by changes since the last iteration) */
 			for (size_t y = 0; y < pGrid.size(); ++y) {
-				ChangeRow& row = changes.rows[y];
+				StraightenRow& row = pStraightenRows[y];
 
 				/* check if the row is considered dirty and restart its iteration */
-				if (row.corners.empty() || !fChangeCheckOutdated(row.rect, row.age, changes))
+				if (row.corners.empty() || !fChangeCheckOutdated(row.tracked))
 					continue;
-				row.rect = GridRect{};
-				row.age = changes.changes.size();
+				row.tracked = { .rect = GridRect{}, .age = pStraightenList.size() };
 
 				/* iterate over the corners of the row and check if they are potential indented corners for this pass */
 				for (size_t i = 0; i < row.corners.size();) {
-					ChangeCorner& corner = row.corners[i++];
+					StraightenCorner& corner = row.corners[i++];
 					size_t x = corner.x;
 
 					/* check if the corner is a corner in the opposite direction in
@@ -913,8 +915,8 @@ namespace ascg::detail {
 
 					/* check if the corner is outdated and otherwise just update the row-rect (after
 					*	checking the direction to ensure the row-rect only contains relevant corners) */
-					if (!fChangeCheckOutdated(corner.rect, corner.age, changes)) {
-						row.rect = (row.rect.empty() ? corner.rect : row.rect.merge(corner.rect));
+					if (!fChangeCheckOutdated(corner.tracked)) {
+						row.tracked.rect = (row.tracked.rect.empty() ? corner.tracked.rect : row.tracked.rect.merge(corner.tracked.rect));
 						continue;
 					}
 
@@ -922,12 +924,14 @@ namespace ascg::detail {
 					*	cells inspected by the given indentation-check operation */
 					size_t xOther = x, yOther = y, xEnd = x, target = 0;
 					bool valid = fMapIndentCorner(x, y, xOther, yOther, xEnd, target);
-					corner.rect = GridRect{
-						.left = std::min<size_t>({ x, xOther, xEnd }), .top = std::min<size_t>(y, yOther),
-						.right = std::max<size_t>({ x, xOther, xEnd }), .bottom = std::max<size_t>(y, yOther)
+					corner.tracked = {
+						.rect = GridRect{
+							.left = std::min<size_t>({ x, xOther, xEnd }), .top = std::min<size_t>(y, yOther),
+							.right = std::max<size_t>({ x, xOther, xEnd }), .bottom = std::max<size_t>(y, yOther)
+						},
+						.age = pStraightenList.size()
 					};
-					row.rect = (row.rect.empty() ? corner.rect : row.rect.merge(corner.rect));
-					corner.age = changes.changes.size();
+					row.tracked.rect = (row.tracked.rect.empty() ? corner.tracked.rect : row.tracked.rect.merge(corner.tracked.rect));
 
 					/* check if a target axis to be reduced by was found */
 					if (!valid || target == xOther)
@@ -973,14 +977,14 @@ namespace ascg::detail {
 					pGrid[y][xOther].kind = detail::CellKind::empty;
 
 					/* add the rect as change (before updating the corner lists as it invalidates the corner reference) */
-					changes.changes.push_back(corner.rect);
+					pStraightenList.push_back(corner.tracked.rect);
 					dirty = true;
 
 					/* update the corners of the two modified rows (only the end-rows are affected by the corner
 					*	changes) and invalidate the other row, as it has now been modified and requires a re-scan */
-					fChangeUpdateRow(y, (target != x ? std::optional<size_t>{ target } : std::nullopt), changes);
-					fChangeUpdateRow(yOther, (!endIsNode && target != xEnd ? std::optional<size_t>{ target } : std::nullopt), changes);
-					changes.rows[yOther].rect = GridRect{};
+					fChangeUpdateRow(y, (target != x ? std::optional<size_t>{ target } : std::nullopt));
+					fChangeUpdateRow(yOther, (!endIsNode && target != xEnd ? std::optional<size_t>{ target } : std::nullopt));
+					pStraightenRows[yOther].tracked.rect = GridRect{};
 
 					/* continue the straightening after the current corner (due to the list being ordered, it matches the next in line) */
 					for (i = 0; i < row.corners.size() && row.corners[i].x <= x; ++i);
@@ -988,7 +992,7 @@ namespace ascg::detail {
 			}
 			return dirty;
 		}
-		void fInsertDualSwap(size_t y, size_t yOther, size_t xCorner, size_t xCross) const {
+		void fInsertDualSwap(size_t y, size_t yOther, size_t xCorner, size_t xCross) {
 			/* insert the empty row to be used (insert it away from the y-other) */
 			size_t yMove = (yOther > y ? y++ : y + 1);
 			fInsertNullRow(yMove);
@@ -1001,7 +1005,7 @@ namespace ascg::detail {
 			pGrid[y][xCorner].kind = detail::CellKind::vertical;
 			pGrid[yMove][xCross].kind = pGrid[y][xCross].mirrorFull();
 		}
-		void fFixDualCornerBlock(size_t xCorner, size_t yCorner, bool leftwards) const {
+		void fFixDualCornerBlock(size_t xCorner, size_t yCorner, bool leftwards) {
 			/* check if the index lies right at the bounds, in which case
 			*	the grid needs to be extended to provide space for a detour */
 			if (leftwards ? xCorner == 0 : xCorner + 1 == pGrid[yCorner].size())
@@ -1061,7 +1065,7 @@ namespace ascg::detail {
 				return false;
 			return true;
 		}
-		void fFixSingleCornerBlock(size_t xBase, size_t yBase, size_t xEnd, size_t yOther, size_t xBlock, size_t yBlock) const {
+		void fFixSingleCornerBlock(size_t xBase, size_t yBase, size_t xEnd, size_t yOther, size_t xBlock, size_t yBlock) {
 			/* apply the single corner fix (requires the preconditions of fFixIsSingleCornerBlock to hold and the grid to be unmodified) */
 			size_t xSpacer = detail::AwayFrom(xBlock, xBase);
 			bool baseLower = (yBase < yBlock), baseLeft = (xBase < xBlock);
@@ -1128,7 +1132,7 @@ namespace ascg::detail {
 			pGrid[ySpacer][xSpacer].kind = pGrid[ySpacer][xSpacer].removeVertical();
 			pGrid[yDetour][xSpacer].kind = detail::Cell{ kindDetour }.mirrorFull();
 		}
-		bool fFixInterlocks(bool leftwards, GridPoint& point, size_t& appliedInterlockHash) const {
+		bool fFixInterlocks(bool leftwards, GridPoint& point, size_t& appliedInterlockHash) {
 			/* find the next corner to pursue (iterate until one has been found or all have been checked) */
 			for (; point.y < pGrid.size(); point.x = 0, ++point.y) {
 				detail::Row& row = pGrid[point.y];
@@ -1237,7 +1241,7 @@ namespace ascg::detail {
 		}
 
 	private:
-		void fShrinkHorizontal() const {
+		void fShrinkHorizontal() {
 			std::vector<bool> empty(pGrid[0].size(), true);
 
 			/* iterate over all cells and mark all non-removable columns as not empty */
@@ -1264,7 +1268,7 @@ namespace ascg::detail {
 			if (index < empty.size()) for (detail::Row& row : pGrid)
 				row.resize(index);
 		}
-		void fShrinkVertical() const {
+		void fShrinkVertical() {
 			size_t sizeReduced = 0, afterNode = 0;
 			bool lastRemovable = false;
 
@@ -1308,7 +1312,7 @@ namespace ascg::detail {
 			/* check if the column and the right neighbor are disconnected on the given row */
 			return (!pGrid[y][x].anyRight() && (!pGrid[y][x].isNode() || x + 1 >= pGrid[y].size() || !pGrid[y][x + 1].isNode()));
 		}
-		std::pair<bool, size_t> fTestReductionSlot(std::vector<size_t>& strand, size_t x) const {
+		std::pair<bool, size_t> fTestReductionSlot(const std::vector<size_t>& strand, size_t x) const {
 			/* check if the cell itself is necessary and cannot be removed */
 			size_t y = strand[x];
 			if (!pGrid[y][x].simpleVertical())
@@ -1336,7 +1340,7 @@ namespace ascg::detail {
 			}
 			return{ true, 0 };
 		}
-		bool fFindRemovableStrand(std::vector<size_t>& strand) const {
+		bool fFindRemovableStrand(std::vector<size_t>& strand) {
 			std::vector<std::pair<size_t, size_t>> ranges(pGrid[0].size() - 1, std::pair<size_t, size_t>{});
 			bool endReached = false;
 
@@ -1410,7 +1414,7 @@ namespace ascg::detail {
 				endReached = true;
 			}
 		}
-		void fCompressGrid() const {
+		void fCompressGrid() {
 			/* perform a full horizontal shrinking to remove any unnecessary horizontals (no need for in-depth
 			*	merging and removing, as the straightening's and interlock-fixings already do so implicitly) */
 			fShrinkHorizontal();
@@ -1460,7 +1464,7 @@ namespace ascg::detail {
 				return 1;
 			return 0;
 		}
-		bool fShiftNode(std::map<NodePoint, intptr_t>& open, std::set<NodePoint>& closed, std::optional<ShiftTarget>& current) const {
+		bool fShiftNode(std::map<NodePoint, intptr_t>& open, std::set<NodePoint>& closed, std::optional<ShiftTarget>& current) {
 			/* node placement is identified by its index and first cell position, as for each grid, the
 			*	rows may be slightly shifted, but the overall starting horizontal position can be expected
 			*	to be consistent, as any shifts in it are assumed to also invalidate the grid score */
@@ -1574,19 +1578,25 @@ namespace ascg::detail {
 		}
 
 	private:
-		void fBuildStraighten(bool leftFirst) const {
+		void fBuildStraighten(bool leftFirst) {
 			Alignment first = (leftFirst ? Alignment::leftwards : Alignment::rightwards);
 			Alignment second = (leftFirst ? Alignment::rightwards : Alignment::leftwards);
-			ChangeCache changes{ .rows = std::vector<ChangeRow>(pGrid.size()) };
+
+			/* reset the straighten state (keep across straightenings to prevent repeated allocations) */
+			pStraightenList.clear();
+			if (pStraightenRows.size() < pGrid.size())
+				pStraightenRows.resize(pGrid.size());
 
 			/* collect all of the corners into the change cache */
 			for (size_t y = 0; y < pGrid.size(); ++y) {
 				const detail::Row& gridRow = pGrid[y];
-				ChangeRow& changeRow = changes.rows[y];
+				StraightenRow& changeRow = pStraightenRows[y];
+				changeRow.corners.clear();
+				changeRow.tracked = { .rect = GridRect{}, .age = 0 };
 
 				for (size_t x = 0; x < gridRow.size(); ++x) {
 					if (gridRow[x].anyCorner())
-						changeRow.corners.push_back(ChangeCorner{ .x = x });
+						changeRow.corners.push_back(StraightenCorner{ .tracked = {}, .x = x });
 				};
 			}
 
@@ -1616,9 +1626,9 @@ namespace ascg::detail {
 
 				/* invalidate the row rectangles as they depend on the orientation of the straightening
 				*	and apply the straightening until no more corners are found into the given direction */
-				for (ChangeRow& row : changes.rows)
-					row.rect = GridRect{};
-				while (fStraightenGrid(align, halfGrid, changes));
+				for (StraightenRow& row : pStraightenRows)
+					row.tracked.rect = GridRect{};
+				while (fStraightenGrid(align, halfGrid));
 			}
 
 			/* perform a shrinking to ensure irrelevant rows opened by the
@@ -1668,7 +1678,7 @@ namespace ascg::detail {
 		}
 
 	public:
-		std::vector<detail::Row> build(ascg::IterationStop auto&& stopIteration) const {
+		std::vector<detail::Row> build(ascg::IterationStop auto&& stopIteration) {
 			/* check if the layers are empty, in which case nothing needs to be done, and
 			*	otherwise create the initial grid and straighten it (cannot be empty anymore) */
 			if (pLayers.empty())
