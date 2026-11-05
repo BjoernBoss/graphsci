@@ -187,7 +187,7 @@ namespace ascg::detail {
 
 	private:
 		const std::vector<detail::Range>& pRanges;
-		mutable std::vector<detail::Layer> pLayers;
+		std::vector<detail::Layer> pLayers;
 
 	public:
 		LayerBuilder(const std::vector<detail::Range>& ranges) : pRanges{ ranges } {}
@@ -213,7 +213,7 @@ namespace ascg::detail {
 				break;
 			}
 		}
-		void fMovePoint(detail::Point& point, size_t to, size_t index) const {
+		void fMovePoint(detail::Point& point, size_t to, size_t index) {
 			/* notify the neighbors on the other layers of the point moving (the point itself is not updated) */
 			if (detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
 				fUpdatePrevPoint(pLayers[index - 1].points[traverse->prev], traverse->range, to);
@@ -302,7 +302,7 @@ namespace ascg::detail {
 		}
 
 	private:
-		void fConstructLayers() const {
+		void fConstructLayers() {
 			pLayers.clear();
 			if (pRanges.empty())
 				return;
@@ -360,7 +360,7 @@ namespace ascg::detail {
 				}
 			}
 		}
-		bool fReorderLayer(size_t index, Direction direction) const {
+		bool fReorderLayer(size_t index, Direction direction) {
 			detail::Layer& layer = pLayers[index];
 			std::vector<Preferred> preferred;
 			preferred.reserve(layer.points.size());
@@ -409,7 +409,7 @@ namespace ascg::detail {
 			}
 			return true;
 		}
-		bool fShiftLayer(size_t index) const {
+		bool fShiftLayer(size_t index) {
 			detail::Layer& layer = pLayers[index];
 			bool changed = false;
 
@@ -452,7 +452,7 @@ namespace ascg::detail {
 		}
 
 	private:
-		bool fReorderLayers(bool bidirectional) const {
+		bool fReorderLayers(bool bidirectional) {
 			bool changed = false;
 
 			/* perform a full sweep by moving down the layers first and then back up (always adjust against
@@ -463,7 +463,7 @@ namespace ascg::detail {
 				changed = (fReorderLayer(i - 1, bidirectional ? Direction::bidirectional : Direction::forwards) || changed);
 			return changed;
 		}
-		bool fShiftLayers() const {
+		bool fShiftLayers() {
 			bool changed = false;
 
 			/* try to reduce the crossings by shifting the nodes within the
@@ -476,7 +476,7 @@ namespace ascg::detail {
 			}
 			return changed;
 		}
-		size_t fOptimizeLayers(bool bidirectional) const {
+		size_t fOptimizeLayers(bool bidirectional) {
 			std::vector<detail::Layer> bestLayers = pLayers;
 
 			/* measure the current layers to keep track of the best
@@ -505,7 +505,7 @@ namespace ascg::detail {
 		}
 
 	public:
-		std::vector<detail::Layer> build() const {
+		std::vector<detail::Layer> build() {
 			/* check if the ranges are empty, in which case nothing needs to be done,
 			*	and otherwise create the initial layers (cannot be empty anymore) */
 			if (pRanges.empty())

@@ -205,6 +205,7 @@ namespace ascg::detail {
 		std::unordered_set<size_t> pFailedFixes;
 		std::vector<StraightenRow> pStraightenRows;
 		std::vector<GridRect> pStraightenList;
+		std::vector<std::vector<size_t>> pCompressNodes;
 
 	public:
 		GridBuilder(const std::vector<detail::Range>& ranges, const std::vector<detail::Layer>& layers) : pRanges{ ranges }, pLayers{ layers } {}
@@ -1320,21 +1321,29 @@ namespace ascg::detail {
 			if (y > 0 && y + 1 < pGrid.size() && pGrid[y - 1][x].isNode() && pGrid[y + 1][x].isNode())
 				return{ false, x };
 
-			/* check if there exists any node conflicts within the reduction zone (i.e.
-			*	reducing the column here would move two nodes into the same row) */
+			/* check if this column does not contain any nodes, in which case there
+			*	is no chance that the reduction brings two nodes onto the same row */
+			const std::vector<size_t>& nodes = pCompressNodes[x];
+			if (nodes.empty())
+				return{ true, 0 };
+
+			/* iterate over the entire strand and check if there exists any node conflicts within the reduction zone */
 			for (size_t _x = x; _x > 0; --_x) {
+				/* check if the column does not contain any nodes and can therefore be skipped */
+				if (pCompressNodes[_x - 1].empty())
+					continue;
 				size_t o = strand[_x - 1];
 
-				/* check if the current reduction is before the previous reduction, in which case any nodes on this
-				*	column between the two reductions must not fall onto a row, in which there already is a node */
-				if (y < o) for (size_t _y = y; _y < o; ++_y) {
-					if (pGrid[_y][_x - 1].isNode() && pGrid[_y + 1][x].isNode())
+				/* check if the current reduction is lower the previous reduction, in which case any nodes on the current column
+				*	between the two reductions must not fall onto a row, in which there already is a node in the previous column */
+				if (y < o) for (size_t _y : nodes) {
+					if (_y > y && _y <= o && pGrid[_y - 1][_x - 1].isNode())
 						return{ false, x };
 				}
 
 				/* check if its the other way around */
-				else if (y > o) for (size_t _y = o; _y < y; ++_y) {
-					if (pGrid[_y + 1][_x - 1].isNode() && pGrid[_y][x].isNode())
+				else if (y > o) for (size_t _y : nodes) {
+					if (_y >= o && _y < y && pGrid[_y + 1][_x - 1].isNode())
 						return{ false, _x - 1 };
 				}
 			}
@@ -1343,6 +1352,18 @@ namespace ascg::detail {
 		bool fFindRemovableStrand(std::vector<size_t>& strand) {
 			std::vector<std::pair<size_t, size_t>> ranges(pGrid[0].size() - 1, std::pair<size_t, size_t>{});
 			bool endReached = false;
+
+			/* collect the rows of the node cells per column, relevant for reduction verification to prevent
+			*	conflicting node placements (keep across compressions to prevent repeated allocations) */
+			pCompressNodes.resize(pGrid[0].size());
+			for (std::vector<size_t>& rows : pCompressNodes)
+				rows.clear();
+			for (size_t y = 0; y < pGrid.size(); ++y) {
+				for (size_t x = 0; x < pGrid[y].size(); ++x) {
+					if (pGrid[y][x].isNode())
+						pCompressNodes[x].push_back(y);
+				}
+			}
 
 			/* iterate over the entire width and find all overlapping disconnected
 			*	ranges and check if a reducible strand can be layed into it */
