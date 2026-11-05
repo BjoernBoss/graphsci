@@ -30,6 +30,9 @@ namespace ascg::detail {
 		bool isArrow() const {
 			return (kind == detail::CellKind::arrowTop || kind == detail::CellKind::arrowBottom);
 		}
+		bool separate() const {
+			return (isNode() || isArrow());
+		}
 		bool cornerLeft() const {
 			return (kind == detail::CellKind::leftTop || kind == detail::CellKind::leftBottom);
 		}
@@ -1270,44 +1273,40 @@ namespace ascg::detail {
 				row.resize(index);
 		}
 		void fShrinkVertical() {
-			size_t sizeReduced = 0, afterNode = 0;
-			bool lastRemovable = false;
+			size_t reduced = 0;
+			bool lastNode = false;
 
-			/* iterate over the rows and remove all removable rows, while ensuring
-			*	that there is at least one row between two neighboring nodes */
-			for (size_t i = 0; i < pGrid.size(); ++i) {
+			/* iterate over the rows and remove all removable rows, while ensuring that there is at
+			*	least one row between two neighboring node-rows and that arrow heads are not left alone */
+			for (size_t y = 0; y < pGrid.size(); ++y) {
 				bool removable = true, node = false;
+				const detail::Row& row = pGrid[y];
 
-				/* check if the current row either is a node or fully removable */
-				for (const detail::Cell& cell : pGrid[i]) {
-					if (!cell.simpleVertical())
+				/* iterate over the current and next row and check if it is removable or if they contain nodes */
+				for (size_t x = 0; x < row.size(); ++x) {
+					if (!row[x].simpleVertical()) {
+						node = (node || row[x].isNode());
 						removable = false;
-					if (cell.isNode())
-						node = true;
+					}
+					else if (y + 1 < pGrid.size()) {
+						if (lastNode && pGrid[y + 1][x].isNode())
+							removable = false;
+						else if (reduced > 0 && pGrid[reduced - 1][x].separate() && pGrid[y + 1][x].separate())
+							removable = false;
+					}
 				}
 
-				/* check if the last row was optional and can be removed */
-				if (lastRemovable && !node)
-					--sizeReduced;
-
-				/* check if the row can immediately be removed */
-				if (removable && afterNode < sizeReduced) {
-					lastRemovable = false;
+				/* check if the row can be removed */
+				if (removable)
 					continue;
-				}
-				lastRemovable = removable;
-
-				/* add the row to the ouptut */
-				if (sizeReduced != i)
-					pGrid[sizeReduced] = std::move(pGrid[i]);
-				++sizeReduced;
-				if (node)
-					afterNode = sizeReduced;
+				if (reduced != y)
+					pGrid[reduced] = std::move(pGrid[y]);
+				++reduced, lastNode = node;
 			}
 
 			/* check if the actual grid can be reduced */
-			if (sizeReduced < pGrid.size())
-				pGrid.erase(pGrid.begin() + sizeReduced, pGrid.end());
+			if (reduced < pGrid.size())
+				pGrid.erase(pGrid.begin() + reduced, pGrid.end());
 		}
 		bool fTestDisconnection(size_t x, size_t y) const {
 			/* check if the column and the right neighbor are disconnected on the given row */
@@ -1318,7 +1317,7 @@ namespace ascg::detail {
 			size_t y = strand[x];
 			if (!pGrid[y][x].simpleVertical())
 				return{ false, x };
-			if (y > 0 && y + 1 < pGrid.size() && pGrid[y - 1][x].isNode() && pGrid[y + 1][x].isNode())
+			if (y > 0 && y + 1 < pGrid.size() && pGrid[y - 1][x].separate() && pGrid[y + 1][x].separate())
 				return{ false, x };
 
 			/* check if this column does not contain any nodes, in which case there
@@ -1656,7 +1655,7 @@ namespace ascg::detail {
 			*	straightening do not strain the remainder of the algorithm */
 			fShrinkVertical();
 		}
-		bool fBuildFixInterlocks(ascg::IterationStop auto&& stopIteration) const {
+		bool fBuildFixInterlocks(ascg::IterationStop auto&& stopIteration) {
 			/* collect the current best grid state as basis for interlock fixing and
 			*	cache the best state to be able to recover it on worse performances */
 			std::vector<detail::Row> bestGrid = pGrid;
