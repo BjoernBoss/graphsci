@@ -8,10 +8,10 @@ namespace ascg::detail {
 	class Renderer {
 	private:
 		const detail::LayerState& pLayers;
-		const std::vector<detail::Row>& pGrid;
+		const detail::GridState& pGrid;
 
 	public:
-		Renderer(const detail::LayerState& layers, const std::vector<detail::Row>& grid) : pLayers{ layers }, pGrid{ grid } {}
+		Renderer(const detail::LayerState& layers, const detail::GridState& grid) : pLayers{ layers }, pGrid{ grid } {}
 
 	private:
 		std::string fDrawRow(const detail::Row& row) const {

@@ -125,6 +125,7 @@ namespace ascg::detail {
 		}
 	};
 	using Row = std::vector<detail::Cell>;
+	using GridState = std::vector<detail::Row>;
 
 	/* build a grid representation from the layers and optimizes it by its dimensions and visual complexity:
 	*	1.	construct the grid row by row and straighten it by removing unnecessary dents and corners
@@ -203,7 +204,7 @@ namespace ascg::detail {
 
 	private:
 		const detail::LayerState& pLayers;
-		std::vector<detail::Row> pGrid;
+		detail::GridState pGrid;
 		std::unordered_set<size_t> pFailedFixes;
 		std::vector<StraightenRow> pStraightenRows;
 		std::vector<GridRect> pStraightenList;
@@ -225,7 +226,7 @@ namespace ascg::detail {
 			}
 			return score;
 		}
-		intptr_t fApplyBestGrid(std::vector<detail::Row>& bestGrid, GridScore& bestScore) {
+		intptr_t fApplyBestGrid(detail::GridState& bestGrid, GridScore& bestScore) {
 			GridScore score = fMeasureGrid();
 
 			/* compare the grid score to determine if a change has occurred */
@@ -1686,7 +1687,7 @@ namespace ascg::detail {
 		bool fBuildFixInterlocks(ascg::IterationStop auto&& stopIteration) {
 			/* collect the current best grid state as basis for interlock fixing and
 			*	cache the best state to be able to recover it on worse performances */
-			std::vector<detail::Row> bestGrid = pGrid;
+			detail::GridState bestGrid = pGrid;
 			GridScore bestScore = fMeasureGrid();
 			bool stopped = false;
 
@@ -1726,7 +1727,7 @@ namespace ascg::detail {
 		}
 
 	public:
-		std::vector<detail::Row> build(ascg::IterationStop auto&& stopIteration) {
+		detail::GridState build(ascg::IterationStop auto&& stopIteration) {
 			/* check if the layers are empty, in which case nothing needs to be done, and
 			*	otherwise create the initial grid and straighten it (cannot be empty anymore) */
 			if (pLayers.layers.empty())
@@ -1735,7 +1736,7 @@ namespace ascg::detail {
 			fBuildStraighten(true);
 
 			/* setup the currently best grid version (to be able to recover to it in case of worse visited graphs) */
-			std::vector<detail::Row> bestGrid = pGrid;
+			detail::GridState bestGrid = pGrid;
 			GridScore bestScore = fMeasureGrid();
 
 			/* iterate until no more nodes need to be shifted or the stop has been requested */

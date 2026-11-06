@@ -31,7 +31,7 @@ namespace ascg {
 	private:
 		ascg::Graph fFinalize(ascg::IterationStop auto&& stopTest) const {
 			detail::LayerState layers = detail::LayerBuilder{ pRanges }.build();
-			std::vector<detail::Row> grid = detail::GridBuilder{ layers }.build(stopTest);
+			detail::GridState grid = detail::GridBuilder{ layers }.build(stopTest);
 			auto [rows, map] = detail::Renderer{ layers, grid }.draw(ascg::NoNode);
 			return ascg::Graph{ .rows = std::move(rows), .map = std::move(map) };
 		}
