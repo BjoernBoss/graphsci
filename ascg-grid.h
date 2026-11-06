@@ -506,7 +506,7 @@ namespace ascg::detail {
 			const detail::Layer& layer = pLayers.layers[index];
 			std::map<size_t, size_t> out;
 
-			/* helper to collect the endpoint strands and sort them by their
+			/* helper to collect the endpoint edges and sort them by their
 			*	other side (the other-side ordering is preserved into the grid) */
 			const auto sortEndpoints = [](const detail::Endpoints& eps) -> std::vector<size_t> {
 				const detail::Endpoint* list = eps.begin();
@@ -520,36 +520,30 @@ namespace ascg::detail {
 					return ((list[f].other != list[s].other) ? (list[f].other < list[s].other) : (f < s));
 				});
 
-				/* convert the indices back to the actual strand */
+				/* convert the indices back to the actual edges */
 				for (size_t& val : out)
-					val = list[val].strand;
+					val = list[val].edge;
 				return out;
 			};
 
-			/* iterate over the nodes and assign each strand the start
-			*	index it lies at (identical for both starting and ending) */
+			/* iterate over the nodes and assign each edge the index it lies at (identical for both starting and ending) */
 			size_t slotIndex = 0;
 			for (size_t i = 0; i < layer.points.size(); ++i) {
 				const detail::Point& point = layer.points[i];
 
 				/* check if its a simple traversal */
 				if (const detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
-					out[traverse->strand] = slotIndex;
-					slotIndex += pLayers.strands[traverse->strand].size();
+					out[traverse->edge] = slotIndex++;
 					continue;
 				}
 				const detail::Node& node = point.node();
 
 				/* update the indices for the starting and ending nodes */
 				size_t endIndex = slotIndex;
-				for (size_t strand : sortEndpoints(node.start)) {
-					out[strand] = slotIndex;
-					slotIndex += pLayers.strands[strand].size();
-				}
-				for (size_t strand : sortEndpoints(node.end)) {
-					out[strand] = endIndex;
-					endIndex += pLayers.strands[strand].size();
-				}
+				for (size_t edge : sortEndpoints(node.start))
+					out[edge] = slotIndex++;
+				for (size_t edge : sortEndpoints(node.end))
+					out[edge] = endIndex++;
 				slotIndex = std::max<size_t>(slotIndex, endIndex);
 			}
 
@@ -570,47 +564,32 @@ namespace ascg::detail {
 
 			/* iterate over the nodes and write them out to the grid and update the slice simultaneously */
 			for (const detail::Point& point : layer.points) {
-				/* check if its a simple traversal and insert all of its lines */
+				/* check if its a simple traversal */
 				if (const detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
-					size_t where = mapping[traverse->strand];
-
-					/* add all of the separate lines */
-					const detail::Lines& lines = pLayers.strands[traverse->strand];
-					for (size_t i = 0; i < lines.size(); ++i) {
-						row[where + i].kind = detail::CellKind::vertical;
-						slice[where + i] = Slot{
-							.target = upcoming[traverse->strand] + i,
-							.used = true,
-							.top = false,
-							.bottom = (lines.at(i).headLast && pLayers.layers[index + 1].points[traverse->next].isNode() != nullptr)
-						};
-					}
+					size_t where = mapping[traverse->edge];
+					row[where].kind = detail::CellKind::vertical;
+					slice[where] = Slot{
+						.target = upcoming[traverse->edge],
+						.used = true,
+						.top = false,
+						.bottom = (pLayers.edges[traverse->edge].headLast && pLayers.layers[index + 1].points[traverse->next].isNode() != nullptr)
+					};
 					continue;
 				}
 				const detail::Node& node = point.node();
 
+				/* insert all of the node points to the row (iterate over the larger of the nodes to ensure all cells are filled) */
+				for (const detail::Endpoint& ep : (node.start.size() > node.end.size() ? node.start : node.end))
+					row[mapping[ep.edge]].kind = detail::CellKind::node;
+
 				/* update the slice to contain the ranges starting here */
 				for (const detail::Endpoint& ep : node.start) {
-					size_t where = mapping[ep.strand];
-
-					/* add all of the separate lines */
-					const detail::Lines& lines = pLayers.strands[ep.strand];
-					for (size_t i = 0; i < lines.size(); ++i) {
-						row[where + i].kind = detail::CellKind::node;
-						slice[where + i] = Slot{
-							.target = upcoming[ep.strand] + i,
-							.used = true,
-							.top = lines.at(i).headFirst,
-							.bottom = (lines.at(i).headLast && pLayers.layers[index + 1].points[ep.other].isNode() != nullptr)
-						};
-					}
-				}
-
-				/* ensure that all node points, which end in this row, are also represented correctly in the row */
-				for (const detail::Endpoint& ep : node.end) {
-					size_t where = mapping[ep.strand];
-					for (size_t i = 0; i < pLayers.strands[ep.strand].size(); ++i)
-						row[where++].kind = detail::CellKind::node;
+					slice[mapping[ep.edge]] = Slot{
+						.target = upcoming[ep.edge],
+						.used = true,
+						.top = pLayers.edges[ep.edge].headFirst,
+						.bottom = (pLayers.edges[ep.edge].headLast && pLayers.layers[index + 1].points[ep.other].isNode() != nullptr)
+					};
 				}
 			}
 
@@ -754,20 +733,12 @@ namespace ascg::detail {
 			/* compute the minimum width to give to the graph */
 			size_t totalWidth = 0;
 			for (const detail::Layer& layer : pLayers.layers) {
-				size_t width = 0;
+				size_t width = layer.points.size();
 
-				/* sum up the expected width of this layer and update the total width accordingly */
+				/* find the node in the points and update the width accordingly and patch the total width */
 				for (size_t i = 0; i < layer.points.size(); ++i) {
-					if (const detail::Traverse* traverse = layer.points[i].isTraverse(); traverse != nullptr)
-						width += pLayers.strands[traverse->strand].size();
-					else {
-						size_t widthStart = 0, widthEnd = 0;
-						for (const detail::Endpoint& ep : layer.points[i].node().start)
-							widthStart += pLayers.strands[ep.strand].size();
-						for (const detail::Endpoint& ep : layer.points[i].node().end)
-							widthEnd += pLayers.strands[ep.strand].size();
-						width += std::max<size_t>(widthStart, widthEnd);
-					}
+					if (const detail::Node* node = layer.points[i].isNode(); node != nullptr)
+						width += std::max<size_t>(node->start.size(), node->end.size()) - 1;
 				}
 				totalWidth = std::max<size_t>(totalWidth, width);
 			}

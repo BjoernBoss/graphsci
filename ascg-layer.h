@@ -113,12 +113,12 @@ namespace ascg::detail {
 	};
 
 	struct Endpoint {
-		size_t strand = 0;
+		size_t edge = 0;
 		size_t other = 0;
 	};
 	using Endpoints = detail::SmallList<detail::Endpoint>;
 	struct Traverse {
-		size_t strand = 0;
+		size_t edge = 0;
 		size_t prev = 0;
 		size_t next = 0;
 	};
@@ -157,14 +157,13 @@ namespace ascg::detail {
 		std::vector<detail::Point> points;
 		size_t index = 0;
 	};
-	struct Line {
+	struct Edge {
 		bool headFirst = false;
 		bool headLast = false;
 	};
-	using Lines = detail::SmallList<detail::Line>;
 	struct LayerState {
 		std::vector<detail::Layer> layers;
-		std::vector<detail::Lines> strands;
+		std::vector<detail::Edge> edges;
 	};
 
 	/* Order the points of every layer to minimize the crossings between neighboring layers:
@@ -181,10 +180,10 @@ namespace ascg::detail {
 			forwards,
 			backwards
 		};
-		struct StrandId {
+		struct Strand {
 			size_t start = 0;
 			size_t end = 0;
-			bool operator<(const StrandId& other) const {
+			bool operator<(const Strand& other) const {
 				if (start != other.start)
 					return (start < other.start);
 				return (end < other.end);
@@ -208,22 +207,22 @@ namespace ascg::detail {
 		LayerBuilder(const detail::Ranges& ranges) : pRanges{ ranges } {}
 
 	private:
-		void fUpdatePrevPoint(detail::Point& point, size_t strand, size_t to) const {
+		void fUpdatePrevPoint(detail::Point& point, size_t edge, size_t to) const {
 			/* update the endpoint into the given direction to reference the new target */
 			if (detail::Traverse* traverse = point.isTraverse(); traverse != nullptr)
 				traverse->next = to;
 			else for (detail::Endpoint& ep : point.node().start) {
-				if (ep.strand != strand) continue;
+				if (ep.edge != edge) continue;
 				ep.other = to;
 				break;
 			}
 		}
-		void fUpdateNextPoint(detail::Point& point, size_t strand, size_t to) const {
+		void fUpdateNextPoint(detail::Point& point, size_t edge, size_t to) const {
 			/* update the endpoint into the given direction to reference the new target */
 			if (detail::Traverse* traverse = point.isTraverse(); traverse != nullptr)
 				traverse->prev = to;
 			else for (detail::Endpoint& ep : point.node().end) {
-				if (ep.strand != strand) continue;
+				if (ep.edge != edge) continue;
 				ep.other = to;
 				break;
 			}
@@ -231,40 +230,39 @@ namespace ascg::detail {
 		void fMovePoint(detail::Point& point, size_t to, size_t index) {
 			/* notify the neighbors on the other layers of the point moving (the point itself is not updated) */
 			if (detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
-				fUpdatePrevPoint(pLayerGraph.layers[index - 1].points[traverse->prev], traverse->strand, to);
-				fUpdateNextPoint(pLayerGraph.layers[index + 1].points[traverse->next], traverse->strand, to);
+				fUpdatePrevPoint(pLayerGraph.layers[index - 1].points[traverse->prev], traverse->edge, to);
+				fUpdateNextPoint(pLayerGraph.layers[index + 1].points[traverse->next], traverse->edge, to);
 				return;
 			}
 			for (detail::Endpoint& ep : point.node().end)
-				fUpdatePrevPoint(pLayerGraph.layers[index - 1].points[ep.other], ep.strand, to);
+				fUpdatePrevPoint(pLayerGraph.layers[index - 1].points[ep.other], ep.edge, to);
 			for (detail::Endpoint& ep : point.node().start)
-				fUpdateNextPoint(pLayerGraph.layers[index + 1].points[ep.other], ep.strand, to);
+				fUpdateNextPoint(pLayerGraph.layers[index + 1].points[ep.other], ep.edge, to);
 		}
 		intptr_t fGetSwapDelta(const detail::Point& l, const detail::Point& r) const {
 			/* helper to compute the crossing delta between two single endpoints or a list of endpoints */
-			const auto swapPair = [&strands = pLayerGraph.strands](size_t lOther, size_t lStrand, size_t rOther, size_t rStrand) -> intptr_t {
+			const auto swapPair = [](size_t lOther, size_t rOther) -> intptr_t {
 				if (lOther == rOther)
 					return 0;
-				intptr_t weight = static_cast<intptr_t>(strands[lStrand].size() * strands[rStrand].size());
-				return (lOther < rOther ? weight : -weight);
+				return (lOther < rOther ? 1 : -1);
 			};
-			const auto swapEndpoints = [swapPair](size_t lOther, size_t lStrand, const detail::Endpoints& rEps) -> intptr_t {
+			const auto swapEndpoints = [swapPair](size_t lOther, const detail::Endpoints& rEps) -> intptr_t {
 				intptr_t delta = 0;
 				for (const detail::Endpoint& ep : rEps)
-					delta += swapPair(lOther, lStrand, ep.other, ep.strand);
+					delta += swapPair(lOther, ep.other);
 				return delta;
 			};
 
 			/* check if at least one of the points is a transition, which makes the calculations easier */
 			if (const detail::Traverse* left = l.isTraverse(); left != nullptr) {
 				if (const detail::Traverse* right = r.isTraverse(); right != nullptr)
-					return swapPair(left->prev, left->strand, right->prev, right->strand) + swapPair(left->next, left->strand, right->next, right->strand);
+					return swapPair(left->prev, right->prev) + swapPair(left->next, right->next);
 				const detail::Node& right = r.node();
-				return swapEndpoints(left->prev, left->strand, right.end) + swapEndpoints(left->next, left->strand, right.start);
+				return swapEndpoints(left->prev, right.end) + swapEndpoints(left->next, right.start);
 			}
 			else if (const detail::Traverse* right = r.isTraverse(); right != nullptr) {
 				const detail::Node& left = l.node();
-				return -(swapEndpoints(right->prev, right->strand, left.end) + swapEndpoints(right->next, right->strand, left.start));
+				return -(swapEndpoints(right->prev, left.end) + swapEndpoints(right->next, left.start));
 			}
 
 			/* compute the delta over the two nodes */
@@ -272,9 +270,9 @@ namespace ascg::detail {
 			const detail::Node& right = r.node();
 			intptr_t delta = 0;
 			for (const detail::Endpoint& ep : left.end)
-				delta += swapEndpoints(ep.other, ep.strand, right.end);
+				delta += swapEndpoints(ep.other, right.end);
 			for (const detail::Endpoint& ep : left.start)
-				delta += swapEndpoints(ep.other, ep.strand, right.start);
+				delta += swapEndpoints(ep.other, right.start);
 			return delta;
 		}
 		std::pair<size_t, size_t> fMeasureLayers() const {
@@ -282,15 +280,14 @@ namespace ascg::detail {
 			size_t crossings = 0;
 
 			/* helper to count the crossings */
-			const auto addCrossings = [&strands = pLayerGraph.strands, &crossings](const detail::Point& lPoint, size_t rOther, size_t rStrand) -> void {
-				size_t weight = strands[rStrand].size();
+			const auto addCrossings = [&crossings](const detail::Point& lPoint, size_t rOther) -> void {
 				if (const detail::Traverse* traverse = lPoint.isTraverse(); traverse != nullptr) {
 					if (rOther < traverse->prev)
-						crossings += weight * strands[traverse->strand].size();
+						++crossings;
 				}
 				else for (const detail::Endpoint& ep : lPoint.node().end) {
 					if (rOther < ep.other)
-						crossings += weight * strands[ep.strand].size();
+						++crossings;
 				}
 			};
 
@@ -299,16 +296,16 @@ namespace ascg::detail {
 				for (size_t i = 0; i < layer.points.size(); ++i) {
 					const detail::Point& point = layer.points[i];
 
-					/* extend the hash (use the ranges + 1 to identify traversals and 0 for the node) */
-					hasher.add(point.isTraverse() != nullptr ? point.traverse().strand + 1 : 0);
+					/* extend the hash (use the edge + 1 to identify traversals and 0 for the node) */
+					hasher.add(point.isTraverse() != nullptr ? point.traverse().edge + 1 : 0);
 
 					/* iterate over the upcoming points and compute the crossings with this point */
 					for (size_t k = i + 1; k < layer.points.size(); ++k) {
 						const detail::Point& other = layer.points[k];
 						if (const detail::Traverse* traverse = other.isTraverse(); traverse != nullptr)
-							addCrossings(point, traverse->prev, traverse->strand);
+							addCrossings(point, traverse->prev);
 						else for (const detail::Endpoint& ep : other.node().end)
-							addCrossings(point, ep.other, ep.strand);
+							addCrossings(point, ep.other);
 					}
 				}
 
@@ -321,21 +318,18 @@ namespace ascg::detail {
 	private:
 		void fConstructLayers() {
 			pLayerGraph.layers.clear();
-			pLayerGraph.strands.clear();
-			if (pRanges.empty())
-				return;
+			pLayerGraph.edges.clear();
 
-			/* setup the map of all strand-ranges to their strands (sorted by their start) */
-			std::map<StrandId, size_t> open;
-			std::vector<size_t> strandEnd;
+			/* setup the map of all ranges to their edge (sorted by their start; guarantee at most one range per edge) */
+			std::map<Strand, size_t> open;
+			std::vector<size_t> edgeEnd;
 			for (size_t i = 0; i < pRanges.size(); ++i) {
-				StrandId strand{ .start = pRanges[i].first, .end = pRanges[i].last };
-				auto it = open.find(strand); {
-					it = open.insert({ strand, pLayerGraph.strands.size() }).first;
-					pLayerGraph.strands.emplace_back();
-					strandEnd.push_back(strand.end);
+				Strand strand = Strand{ .start = pRanges[i].first, .end = pRanges[i].last };
+				if (auto it = open.find(strand); it == open.end()) {
+					open.insert({ strand, pLayerGraph.edges.size() });
+					pLayerGraph.edges.push_back(detail::Edge{ .headFirst = pRanges[i].headFirst, .headLast = pRanges[i].headLast });
+					edgeEnd.push_back(strand.end);
 				}
-				pLayerGraph.strands[it->second].push(detail::Line{ .headFirst = pRanges[i].headFirst, .headLast = pRanges[i].headLast });
 			}
 
 			/* setup the overall layers and nodes and traverse points */
@@ -346,16 +340,16 @@ namespace ascg::detail {
 				layer.points.push_back(detail::Point{ .body = detail::Node{} });
 				layerNext = std::nullopt;
 
-				/* insert all strands which start at the current layer and update the next layer index */
+				/* insert all edges which start at the current layer and update the next layer index */
 				auto itNext = open.begin();
 				while (!open.empty() && itNext->first.start == layer.index) {
-					layer.points[0].node().start.push({ .strand = itNext->second });
+					layer.points[0].node().start.push({ .edge = itNext->second });
 					if (!layerNext.has_value() || itNext->first.end < *layerNext)
 						layerNext = itNext->first.end;
 					itNext = open.erase(itNext);
 				}
 
-				/* check if the start of the next layer is lower than any end of the inserted strands */
+				/* check if the start of the next layer is lower than any end of the inserted edges */
 				if (!open.empty() && (!layerNext.has_value() || itNext->first.start < *layerNext))
 					layerNext = itNext->first.start;
 
@@ -363,16 +357,16 @@ namespace ascg::detail {
 				if (pLayerGraph.layers.size() <= 1)
 					continue;
 
-				/* helper to connect a strand to the top layer and ensure proper linkage between the
+				/* helper to connect an edge to the top layer and ensure proper linkage between the
 				*	layers and to ensure the next assumed layer respects all currently open endings */
-				const auto addStrand = [&strandEnd, &layer, &layerNext](size_t strand, size_t index) -> size_t {
-					if (strandEnd[strand] == layer.index) {
-						layer.points[0].node().end.push({ .strand = strand, .other = index });
+				const auto addEdge = [&edgeEnd, &layer, &layerNext](size_t edge, size_t index) -> size_t {
+					if (edgeEnd[edge] == layer.index) {
+						layer.points[0].node().end.push({ .edge = edge, .other = index });
 						return 0;
 					}
-					layer.points.push_back(detail::Point{ .body = detail::Traverse{.strand = strand, .prev = index} });
-					if (!layerNext.has_value() || strandEnd[strand] < *layerNext)
-						layerNext = strandEnd[strand];
+					layer.points.push_back(detail::Point{ .body = detail::Traverse{.edge = edge, .prev = index} });
+					if (!layerNext.has_value() || edgeEnd[edge] < *layerNext)
+						layerNext = edgeEnd[edge];
 					return layer.points.size() - 1;
 				};
 
@@ -380,9 +374,9 @@ namespace ascg::detail {
 				std::vector<detail::Point>& previous = pLayerGraph.layers[pLayerGraph.layers.size() - 2].points;
 				for (size_t i = 0; i < previous.size(); ++i) {
 					if (auto* traverse = previous[i].isTraverse(); traverse != nullptr)
-						traverse->next = addStrand(traverse->strand, i);
+						traverse->next = addEdge(traverse->edge, i);
 					else for (detail::Endpoint& ep : previous[i].node().start)
-						ep.other = addStrand(ep.strand, i);
+						ep.other = addEdge(ep.edge, i);
 				}
 			}
 		}
@@ -401,22 +395,17 @@ namespace ascg::detail {
 				*	without any neighbors in the given direction keeps the current position) */
 				const detail::Point& pt = layer.points[i];
 				if (const detail::Traverse* traverse = pt.isTraverse(); traverse != nullptr) {
-					size_t weight = pLayerGraph.strands[traverse->strand].size();
 					if (direction != Direction::forwards)
-						others += static_cast<float>(traverse->prev) * weight, count += weight;
+						others += static_cast<float>(traverse->prev), ++count;
 					if (direction != Direction::backwards)
-						others += static_cast<float>(traverse->next) * weight, count += weight;
+						others += static_cast<float>(traverse->next), ++count;
 				}
 				else {
 					const detail::Node& node = pt.node();
-					if (direction != Direction::forwards) for (const detail::Endpoint& ep : node.end) {
-						size_t weight = pLayerGraph.strands[ep.strand].size();
-						others += static_cast<float>(ep.other) * weight, count += weight;
-					}
-					if (direction != Direction::backwards) for (const detail::Endpoint& ep : node.start) {
-						size_t weight = pLayerGraph.strands[ep.strand].size();
-						others += static_cast<float>(ep.other) * weight, count += weight;
-					}
+					if (direction != Direction::forwards) for (const detail::Endpoint& ep : node.end)
+						others += static_cast<float>(ep.other), ++count;
+					if (direction != Direction::backwards) for (const detail::Endpoint& ep : node.start)
+						others += static_cast<float>(ep.other), ++count;
 				}
 				preferred.push_back(Preferred{ .average = (count == 0 ? static_cast<float>(i) : others / static_cast<float>(count)), .index = i });
 			}
