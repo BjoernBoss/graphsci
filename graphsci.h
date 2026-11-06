@@ -9,9 +9,9 @@ namespace ascg {
 
 	/*
 	*	Describes a layered graph made up of: # | - , ' A V
-	*	Edges are undirected, unless connected as directed, in which case an arrow-head (A or V) is drawn at the target node.
+	*	Edges can be directed or undirected and multiple edges can connect the same nodes.
 	*	The graph cannot contain self-loops.
-	*	The the layouting will select an ordering of the transitions and lay it out as ascii art.
+	*	The layouting will select an ordering of the transitions and lay it out as ascii art.
 	*	The ordering of the nodes from top to bottom will not be modified and will be used as provided.
 	*/
 	struct Graph {
@@ -30,8 +30,8 @@ namespace ascg {
 
 	private:
 		ascg::Graph fFinalize(ascg::IterationStop auto&& stopTest) const {
-			std::vector<detail::Layer> layers = detail::LayerBuilder{ pRanges }.build();
-			std::vector<detail::Row> grid = detail::GridBuilder{ pRanges, layers }.build(stopTest);
+			detail::LayerState layers = detail::LayerBuilder{ pRanges }.build();
+			std::vector<detail::Row> grid = detail::GridBuilder{ layers }.build(stopTest);
 			auto [rows, map] = detail::Renderer{ layers, grid }.draw(ascg::NoNode);
 			return ascg::Graph{ .rows = std::move(rows), .map = std::move(map) };
 		}

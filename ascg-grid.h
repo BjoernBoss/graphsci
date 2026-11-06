@@ -202,8 +202,7 @@ namespace ascg::detail {
 		};
 
 	private:
-		const std::vector<detail::Range>& pRanges;
-		const std::vector<detail::Layer>& pLayers;
+		const detail::LayerState& pLayers;
 		std::vector<detail::Row> pGrid;
 		std::unordered_set<size_t> pFailedFixes;
 		std::vector<StraightenRow> pStraightenRows;
@@ -211,7 +210,7 @@ namespace ascg::detail {
 		std::vector<std::vector<size_t>> pCompressNodes;
 
 	public:
-		GridBuilder(const std::vector<detail::Range>& ranges, const std::vector<detail::Layer>& layers) : pRanges{ ranges }, pLayers{ layers } {}
+		GridBuilder(const detail::LayerState& layers) : pLayers{ layers } {}
 
 	private:
 		GridScore fMeasureGrid() const {
@@ -503,10 +502,10 @@ namespace ascg::detail {
 
 	private:
 		std::map<size_t, size_t> fSetupNodeMap(size_t index, size_t width) const {
-			const detail::Layer& layer = pLayers[index];
+			const detail::Layer& layer = pLayers.layers[index];
 			std::map<size_t, size_t> out;
 
-			/* helper to collect the endpoint ranges and sort them by their
+			/* helper to collect the endpoint strands and sort them by their
 			*	other side (the other-side ordering is preserved into the grid) */
 			const auto sortEndpoints = [](const detail::Endpoints& eps) -> std::vector<size_t> {
 				const detail::Endpoint* list = eps.begin();
@@ -520,30 +519,36 @@ namespace ascg::detail {
 					return ((list[f].other != list[s].other) ? (list[f].other < list[s].other) : (f < s));
 				});
 
-				/* convert the indices back to the actual ranges */
+				/* convert the indices back to the actual strand */
 				for (size_t& val : out)
-					val = list[val].range;
+					val = list[val].strand;
 				return out;
 			};
 
-			/* iterate over the nodes and assign each range the index it lies at (identical for both starting and ending) */
+			/* iterate over the nodes and assign each strand the start
+			*	index it lies at (identical for both starting and ending) */
 			size_t slotIndex = 0;
 			for (size_t i = 0; i < layer.points.size(); ++i) {
 				const detail::Point& point = layer.points[i];
 
 				/* check if its a simple traversal */
 				if (const detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
-					out[traverse->range] = slotIndex++;
+					out[traverse->strand] = slotIndex;
+					slotIndex += pLayers.strands[traverse->strand].size();
 					continue;
 				}
 				const detail::Node& node = point.node();
 
 				/* update the indices for the starting and ending nodes */
 				size_t endIndex = slotIndex;
-				for (size_t range : sortEndpoints(node.start))
-					out[range] = slotIndex++;
-				for (size_t range : sortEndpoints(node.end))
-					out[range] = endIndex++;
+				for (size_t strand : sortEndpoints(node.start)) {
+					out[strand] = slotIndex;
+					slotIndex += pLayers.strands[strand].size();
+				}
+				for (size_t strand : sortEndpoints(node.end)) {
+					out[strand] = endIndex;
+					endIndex += pLayers.strands[strand].size();
+				}
 				slotIndex = std::max<size_t>(slotIndex, endIndex);
 			}
 
@@ -553,43 +558,58 @@ namespace ascg::detail {
 			return out;
 		}
 		std::vector<Slot> fConstructNode(size_t index, size_t width, std::map<size_t, size_t>& mapping) {
-			const detail::Layer& layer = pLayers[index];
+			const detail::Layer& layer = pLayers.layers[index];
 
 			/* setup the initial slice and row */
 			detail::Row& row = pGrid.emplace_back(width, detail::Cell{});
 			std::vector<Slot> slice(width, Slot{});
 
 			/* setup the mapping of the next node (necessary to populate the slice) */
-			std::map<size_t, size_t> upcoming = (index + 1 >= pLayers.size() ? std::map<size_t, size_t>{} : fSetupNodeMap(index + 1, width));
+			std::map<size_t, size_t> upcoming = (index + 1 >= pLayers.layers.size() ? std::map<size_t, size_t>{} : fSetupNodeMap(index + 1, width));
 
 			/* iterate over the nodes and write them out to the grid and update the slice simultaneously */
 			for (const detail::Point& point : layer.points) {
-				/* check if its a simple traversal */
+				/* check if its a simple traversal and insert all of its lines */
 				if (const detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
-					size_t where = mapping[traverse->range];
-					row[where].kind = detail::CellKind::vertical;
-					slice[where] = Slot{
-						.target = upcoming[traverse->range],
-						.used = true,
-						.top = false,
-						.bottom = (pRanges[traverse->range].headLast && pLayers[index + 1].points[traverse->next].isNode() != nullptr)
-					};
+					size_t where = mapping[traverse->strand];
+
+					/* add all of the separate lines */
+					const detail::Lines& lines = pLayers.strands[traverse->strand];
+					for (size_t i = 0; i < lines.size(); ++i) {
+						row[where + i].kind = detail::CellKind::vertical;
+						slice[where + i] = Slot{
+							.target = upcoming[traverse->strand] + i,
+							.used = true,
+							.top = false,
+							.bottom = (lines.at(i).headLast && pLayers.layers[index + 1].points[traverse->next].isNode() != nullptr)
+						};
+					}
 					continue;
 				}
 				const detail::Node& node = point.node();
 
-				/* insert all of the node points to the row (iterate over the larger of the nodes to ensure all cells are filled) */
-				for (const detail::Endpoint& ep : (node.start.size() > node.end.size() ? node.start : node.end))
-					row[mapping[ep.range]].kind = detail::CellKind::node;
-
 				/* update the slice to contain the ranges starting here */
 				for (const detail::Endpoint& ep : node.start) {
-					slice[mapping[ep.range]] = Slot{
-						.target = upcoming[ep.range],
-						.used = true,
-						.top = pRanges[ep.range].headFirst,
-						.bottom = (pRanges[ep.range].headLast && pLayers[index + 1].points[ep.other].isNode() != nullptr)
-					};
+					size_t where = mapping[ep.strand];
+
+					/* add all of the separate lines */
+					const detail::Lines& lines = pLayers.strands[ep.strand];
+					for (size_t i = 0; i < lines.size(); ++i) {
+						row[where + i].kind = detail::CellKind::node;
+						slice[where + i] = Slot{
+							.target = upcoming[ep.strand] + i,
+							.used = true,
+							.top = lines.at(i).headFirst,
+							.bottom = (lines.at(i).headLast && pLayers.layers[index + 1].points[ep.other].isNode() != nullptr)
+						};
+					}
+				}
+
+				/* ensure that all node points, which end in this row, are also represented correctly in the row */
+				for (const detail::Endpoint& ep : node.end) {
+					size_t where = mapping[ep.strand];
+					for (size_t i = 0; i < pLayers.strands[ep.strand].size(); ++i)
+						row[where++].kind = detail::CellKind::node;
 				}
 			}
 
@@ -732,13 +752,21 @@ namespace ascg::detail {
 
 			/* compute the minimum width to give to the graph */
 			size_t totalWidth = 0;
-			for (const detail::Layer& layer : pLayers) {
-				size_t width = layer.points.size();
+			for (const detail::Layer& layer : pLayers.layers) {
+				size_t width = 0;
 
-				/* find the node in the points and update the total width accordingly and patch teh total width */
+				/* sum up the expected width of this layer and update the total width accordingly */
 				for (size_t i = 0; i < layer.points.size(); ++i) {
-					if (const detail::Node* node = layer.points[i].isNode(); node != nullptr)
-						width += std::max<size_t>(node->start.size(), node->end.size()) - 1;
+					if (const detail::Traverse* traverse = layer.points[i].isTraverse(); traverse != nullptr)
+						width += pLayers.strands[traverse->strand].size();
+					else {
+						size_t widthStart = 0, widthEnd = 0;
+						for (const detail::Endpoint& ep : layer.points[i].node().start)
+							widthStart += pLayers.strands[ep.strand].size();
+						for (const detail::Endpoint& ep : layer.points[i].node().end)
+							widthEnd += pLayers.strands[ep.strand].size();
+						width += std::max<size_t>(widthStart, widthEnd);
+					}
 				}
 				totalWidth = std::max<size_t>(totalWidth, width);
 			}
@@ -748,7 +776,7 @@ namespace ascg::detail {
 			std::map<size_t, size_t> mapping = fSetupNodeMap(0, totalWidth);
 			for (size_t i = 0;; ++i) {
 				std::vector<Slot> slice = fConstructNode(i, totalWidth, mapping);
-				if (i + 1 >= pLayers.size())
+				if (i + 1 >= pLayers.layers.size())
 					break;
 				fConstructTransitions(slice);
 			}
@@ -1701,7 +1729,7 @@ namespace ascg::detail {
 		std::vector<detail::Row> build(ascg::IterationStop auto&& stopIteration) {
 			/* check if the layers are empty, in which case nothing needs to be done, and
 			*	otherwise create the initial grid and straighten it (cannot be empty anymore) */
-			if (pLayers.empty())
+			if (pLayers.layers.empty())
 				return {};
 			fConstructGrid();
 			fBuildStraighten(true);

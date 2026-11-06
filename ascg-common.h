@@ -60,6 +60,7 @@ namespace ascg {
 			bool headFirst = false;
 			bool headLast = false;
 		};
+		using Ranges = std::vector<detail::Range>;
 
 		/* non-standard compliant version of fnv-1a, which does not just hash over single bytes */
 		struct Hasher {

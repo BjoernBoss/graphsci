@@ -7,11 +7,11 @@
 namespace ascg::detail {
 	class Renderer {
 	private:
-		const std::vector<detail::Layer>& pLayers;
+		const detail::LayerState& pLayers;
 		const std::vector<detail::Row>& pGrid;
 
 	public:
-		Renderer(const std::vector<detail::Layer>& layers, const std::vector<detail::Row>& grid) : pLayers{ layers }, pGrid{ grid } {}
+		Renderer(const detail::LayerState& layers, const std::vector<detail::Row>& grid) : pLayers{ layers }, pGrid{ grid } {}
 
 	private:
 		std::string fDrawRow(const detail::Row& row) const {
@@ -68,7 +68,7 @@ namespace ascg::detail {
 
 				/* check if this row contained a node and otherwise mark it as an intermediate row */
 				if (std::ranges::any_of(pGrid[i], [](auto val) -> bool { return val.kind == detail::CellKind::node; }))
-					map.push_back(pLayers[node++].index);
+					map.push_back(pLayers.layers[node++].index);
 				else
 					map.push_back(unusedNode);
 			}
