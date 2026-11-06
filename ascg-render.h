@@ -53,26 +53,23 @@ namespace ascg::detail {
 		}
 
 	public:
-		std::pair<std::vector<std::string>, std::vector<size_t>> draw(size_t unusedNode) const {
-			std::vector<std::string> drawn;
-			std::vector<size_t> map;
+		ascg::Graph draw() const {
+			ascg::Graph graph;
 
-			/* reserve the memory for the output types */
-			drawn.reserve(pGrid.size());
-			map.reserve(pGrid.size());
+			/* reserve the memory for the output rows */
+			graph.rows.reserve(pGrid.size());
+			graph.map.reserve(pLayers.layers.size());
 
 			/* render all of the rows and setup the map back to the layers (based on the preserved ordering of the nodes) */
 			size_t node = 0;
 			for (size_t i = 0; i < pGrid.size(); ++i) {
-				drawn.push_back(fDrawRow(pGrid[i]));
+				graph.rows.push_back(fDrawRow(pGrid[i]));
 
-				/* check if this row contained a node and otherwise mark it as an intermediate row */
+				/* check if this row contained a node and update the map accordingly */
 				if (std::ranges::any_of(pGrid[i], [](auto val) -> bool { return val.kind == detail::CellKind::node; }))
-					map.push_back(pLayers.layers[node++].index);
-				else
-					map.push_back(unusedNode);
+					graph.map.push_back({ pLayers.layers[node++].index, i });
 			}
-			return { drawn, map };
+			return graph;
 		}
 	};
 }
