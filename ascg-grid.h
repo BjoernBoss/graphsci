@@ -546,12 +546,16 @@ namespace ascg::detail {
 				const detail::Node& node = point.node();
 
 				/* update the indices for the starting and ending nodes */
-				size_t endIndex = slotIndex;
+				size_t startIndex = slotIndex, endIndex = slotIndex;
 				for (size_t edge : sortEndpoints(node.start))
-					out[edge] = slotIndex++;
+					out[edge] = startIndex++;
 				for (size_t edge : sortEndpoints(node.end))
 					out[edge] = endIndex++;
-				slotIndex = std::max<size_t>(slotIndex, endIndex);
+
+				/* allocate the additional slot for the self-loop */
+				size_t diff = (startIndex <= endIndex ? (endIndex - startIndex) : (startIndex - endIndex));
+				out[pLayers.edges.size()] = std::min<size_t>(startIndex, endIndex);
+				slotIndex = std::max<size_t>(startIndex, endIndex) + (2 - std::min<size_t>(diff, 2));
 			}
 
 			/* compute the graph shift to center the layer and apply it to the indices */
@@ -559,12 +563,37 @@ namespace ascg::detail {
 				slot += shift;
 			return out;
 		}
-		std::vector<Slot> fConstructNode(size_t index, size_t width, std::map<size_t, size_t>& mapping) {
+		void fConstructNode(size_t index, size_t width, std::vector<Slot>& slice, std::map<size_t, size_t>& mapping) {
 			const detail::Layer& layer = pLayers.layers[index];
+
+			/* check on which side of the node the self loop should be placed */
+			bool topSelfLoop = false;
+			for (const detail::Point& point : layer.points) {
+				if (const detail::Node* node = point.isNode(); node != nullptr) {
+					if (node->start.size() != node->end.size())
+						topSelfLoop = (node->start.size() > node->end.size());
+					else
+						topSelfLoop = (index <= pLayers.layers.size() / 2);
+					break;
+				}
+			}
+
+			/* add the prior self-loop (if necssary) and close off the slice
+			*	(will automatically have spots reserved for the self-loop) */
+			size_t selfLoop = mapping[pLayers.edges.size()];
+			if (topSelfLoop) {
+				detail::Row& row = pGrid.emplace_back();
+				fFillTraversals(row, slice, 0, slice.size());
+				row[selfLoop].kind = detail::CellKind::rightBottom;
+				row[selfLoop + 1].kind = detail::CellKind::leftBottom;
+				slice[selfLoop] = Slot{ .target = selfLoop, .used = true };
+				slice[selfLoop + 1] = Slot{ .target = selfLoop + 1, .used = true };
+			}
+			fAddSliceEdge(pGrid.size(), slice, false);
 
 			/* setup the initial slice and row */
 			detail::Row& row = pGrid.emplace_back(width, detail::Cell{});
-			std::vector<Slot> slice(width, Slot{});
+			slice.assign(width, Slot{});
 
 			/* setup the mapping of the next node (necessary to populate the slice) */
 			std::map<size_t, size_t> upcoming = (index + 1 >= pLayers.layers.size() ? std::map<size_t, size_t>{} : fSetupNodeMap(index + 1, width));
@@ -585,9 +614,12 @@ namespace ascg::detail {
 				}
 				const detail::Node& node = point.node();
 
-				/* insert all of the node points to the row (iterate over the larger of the nodes to ensure all cells are filled) */
+				/* insert all of the node points to the row (iterate over the larger of the nodes
+				*	to ensure all cells are filled; and also separately for the self-loop) */
 				for (const detail::Endpoint& ep : (node.start.size() > node.end.size() ? node.start : node.end))
 					row[mapping[ep.edge]].kind = detail::CellKind::node;
+				row[selfLoop].kind = detail::CellKind::node;
+				row[selfLoop + 1].kind = detail::CellKind::node;
 
 				/* update the slice to contain the ranges starting here */
 				for (const detail::Endpoint& ep : node.start) {
@@ -600,9 +632,25 @@ namespace ascg::detail {
 				}
 			}
 
-			/* replace the mapping with the mapping of the upcoming node and return the slice */
+			/* replace the mapping with the mapping of the upcoming node */
 			mapping = std::move(upcoming);
-			return slice;
+
+			/* check if the self-loop needs to be prepared on this side */
+			if (!topSelfLoop) {
+				slice[selfLoop] = Slot{ .target = selfLoop, .used = true };
+				slice[selfLoop + 1] = Slot{ .target = selfLoop + 1, .used = true };
+			}
+
+			/* add the slice edge for the current node and then the self loop */
+			fAddSliceEdge(pGrid.size(), slice, true);
+			if (!topSelfLoop) {
+				detail::Row& row = pGrid.emplace_back();
+				fFillTraversals(row, slice, 0, slice.size());
+				row[selfLoop].kind = detail::CellKind::rightTop;
+				row[selfLoop + 1].kind = detail::CellKind::leftTop;
+				slice[selfLoop].used = false;
+				slice[selfLoop + 1].used = false;
+			}
 		}
 		void fConstructTransitions(std::vector<Slot>& slice) {
 			size_t numberOfRows = pGrid.size();
@@ -719,7 +767,7 @@ namespace ascg::detail {
 			/* compute the minimum width to give to the graph */
 			size_t totalWidth = 0;
 			for (const detail::Layer& layer : pLayers.layers) {
-				size_t width = layer.points.size();
+				size_t width = layer.points.size() + 2;
 
 				/* find the node in the points and update the width accordingly and patch the total width */
 				for (size_t i = 0; i < layer.points.size(); ++i) {
@@ -732,8 +780,9 @@ namespace ascg::detail {
 			/* fetch the initial node mapping and iterate over the layers and convert
 			*	them to node-rows in the grid and add the intermediate transitions */
 			std::map<size_t, size_t> mapping = fSetupNodeMap(0, totalWidth);
+			std::vector<Slot> slice(totalWidth, Slot{});
 			for (size_t i = 0;; ++i) {
-				std::vector<Slot> slice = fConstructNode(i, totalWidth, mapping);
+				fConstructNode(i, totalWidth, slice, mapping);
 				if (i + 1 >= pLayers.layers.size())
 					break;
 				fConstructTransitions(slice);
@@ -773,6 +822,8 @@ namespace ascg::detail {
 			/* find the other corner of this construct (i.e. after moving horizontal and vertical again, the endpoint) */
 			if (cell.cornerLeft()) while (pGrid[yOther][--xOther].lineHorizontal());
 			else while (pGrid[yOther][++xOther].lineHorizontal());
+			if (cell.cornerTop() == pGrid[yOther][xOther].cornerTop())
+				return false;
 			if (cell.cornerTop()) while (pGrid[++yOther][xOther].lineVertical());
 			else while (pGrid[--yOther][xOther].lineVertical());
 
