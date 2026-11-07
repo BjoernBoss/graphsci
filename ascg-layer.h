@@ -156,6 +156,7 @@ namespace ascg::detail {
 	struct Layer {
 		std::vector<detail::Point> points;
 		size_t index = 0;
+		size_t selfEdge = 0;
 	};
 	struct Edge {
 		bool headFirst = false;
@@ -320,7 +321,8 @@ namespace ascg::detail {
 			pLayerGraph.layers.clear();
 			pLayerGraph.edges.clear();
 
-			/* setup the map of all ranges to their edge (sorted by their start; guarantee at most one range per edge) */
+			/* setup the map of all ranges to their edge (sorted by
+			*	their start; guarantee at most one range per edge) */
 			std::map<Strand, size_t> open;
 			std::vector<size_t> edgeEnd;
 			for (size_t i = 0; i < pRanges.size(); ++i) {
@@ -336,16 +338,21 @@ namespace ascg::detail {
 			std::optional<size_t> layerNext = open.begin()->first.start;
 			while (layerNext.has_value()) {
 				/* setup the next layer with the node at index 0 */
-				detail::Layer& layer = pLayerGraph.layers.emplace_back(detail::Layer{ .index = *layerNext });
+				detail::Layer& layer = pLayerGraph.layers.emplace_back(detail::Layer{ .index = *layerNext, .selfEdge = pLayerGraph.edges.size() });
 				layer.points.push_back(detail::Point{ .body = detail::Node{} });
 				layerNext = std::nullopt;
 
-				/* insert all edges which start at the current layer and update the next layer index */
+				/* insert all edges which start at the current layer and update
+				*	the next layer index and check if a self-loop is part of it */
 				auto itNext = open.begin();
 				while (!open.empty() && itNext->first.start == layer.index) {
-					layer.points[0].node().start.push({ .edge = itNext->second });
-					if (!layerNext.has_value() || itNext->first.end < *layerNext)
-						layerNext = itNext->first.end;
+					if (itNext->first.start == itNext->first.end)
+						layer.selfEdge = itNext->second;
+					else {
+						layer.points[0].node().start.push({ .edge = itNext->second });
+						if (!layerNext.has_value() || itNext->first.end < *layerNext)
+							layerNext = itNext->first.end;
+					}
 					itNext = open.erase(itNext);
 				}
 

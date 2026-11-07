@@ -84,8 +84,7 @@ namespace ascg {
 
 	/*
 	*	Describes a layered graph made up of: # | - , ' A V
-	*	Edges can be directed or undirected but at most one edge per two nodes.
-	*	The graph cannot contain self-loops.
+	*	Edges can be directed or undirected but at most one edge per any two nodes.
 	*	The layouting will select an ordering of the transitions and lay it out as ascii art.
 	*	The ordering of the nodes from top to bottom will not be modified and will be used as provided.
 	*/

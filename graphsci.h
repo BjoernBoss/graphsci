@@ -4,8 +4,8 @@
 #include "ascg-render.h"
 
 namespace ascg {
-	/* collect all edges of the graph and convert them to a final graph
-	*	(only one transition between any two nodes and no self-loops) */
+	/* collect all edges of the graph and convert them to a
+	*	final graph (only one transition between any two nodes) */
 	class Builder {
 	private:
 		std::vector<detail::Range> pRanges;
@@ -20,11 +20,9 @@ namespace ascg {
 
 	public:
 		void connect(size_t a, size_t b, bool aHead = false, bool bHead = false) {
-			/* ensure that the nodes are well ordered and considered valid */
+			/* ensure that the nodes are well ordered */
 			if (a > b)
 				std::swap(a, b), std::swap(aHead, bHead);
-			if (a == b)
-				return;
 			pRanges.push_back(detail::Range{ .first = a, .last = b, .headFirst = aHead, .headLast = bHead });
 		}
 		ascg::Graph finalize() const {
