@@ -852,10 +852,8 @@ namespace ascg::detail {
 			/* find the other corner of this construct (i.e. after moving horizontal and vertical again, the endpoint) */
 			if (cell.cornerLeft()) while (pGrid[yOther][--xOther].lineHorizontal());
 			else while (pGrid[yOther][++xOther].lineHorizontal());
-			if (cell.cornerTop() == pGrid[yOther][xOther].cornerTop())
-				return false;
-			if (cell.cornerTop()) while (pGrid[++yOther][xOther].lineVertical());
-			else while (pGrid[--yOther][xOther].lineVertical());
+			if (pGrid[yOther][xOther].cornerTop()) while (pGrid[--yOther][xOther].lineVertical());
+			else while (pGrid[++yOther][xOther].lineVertical());
 
 			/* find the end of the next horizontal axis walking towards the original horizontal position */
 			bool endIsNode = pGrid[yOther][xOther].isNode();
@@ -877,8 +875,13 @@ namespace ascg::detail {
 			if (endIsNode && xEnd == xOther)
 				return false;
 
-			/* find the target axis to reduce the indentation by */
+			/* initialize the target axis depending on the end being a node or this being
+			*	a self-loop (to prevent node-overrunning or self-loop self-cancellation) */
 			target = (endIsNode ? xEnd : x);
+			if (cell.cornerTop() == (yOther < y))
+				target = detail::Towards(target, xOther);
+
+			/* find the target axis to reduce the indentation by */
 			while (target != xOther) {
 				/* the primary run must be a plain horizontal at the target, to allow a crossing, or, if the target
 				*	lies beyond the second run, the other row must be empty there to provide space for the new corner */
@@ -937,7 +940,7 @@ namespace ascg::detail {
 			tracked.age = pStraightenList.size();
 			return false;
 		}
-		void fChangeUpdateRow(size_t y, std::optional<size_t> added) {
+		void fChangeUpdateRow(size_t y, std::initializer_list<size_t> added) {
 			std::vector<StraightenCorner>& corners = pStraightenRows[y].corners;
 			detail::Row& row = pGrid[y];
 			size_t size = 0;
@@ -954,11 +957,11 @@ namespace ascg::detail {
 			/* update the size to the new reduced list size to remove all dropped slots */
 			corners.resize(size);
 
-			/* insert the new corner into the sorted list (needs to be sorted in order to continue sweep properly) */
-			if (!added.has_value())
-				return;
-			auto it = std::lower_bound(corners.begin(), corners.end(), *added, [](const StraightenCorner& c, size_t x) { return (c.x < x); });
-			corners.insert(it, StraightenCorner{ .tracked = {}, .x = *added });
+			/* insert the new corners into the sorted list (needs to be sorted in order to continue sweep properly) */
+			for (size_t corner : added) {
+				auto it = std::lower_bound(corners.begin(), corners.end(), corner, [](const StraightenCorner& c, size_t x) { return (c.x < x); });
+				corners.insert(it, StraightenCorner{ .tracked = {}, .x = corner });
+			}
 		}
 		bool fStraightenGrid(Alignment align, size_t halfGrid) {
 			bool dirty = false;
@@ -1004,10 +1007,63 @@ namespace ascg::detail {
 					};
 					row.tracked.rect = (row.tracked.rect.empty() ? corner.tracked.rect : row.tracked.rect.merge(corner.tracked.rect));
 
-					/* check if a target axis to be reduced by was found */
-					if (!valid || target == xOther)
+					/* check if a valid indentation rectangle has been found */
+					if (!valid)
 						continue;
-					bool endIsNode = pGrid[yOther][xOther].isNode();
+
+					/* check if no immediate target axis was found, in which case it
+					*	might be a reducible self-loop strip (possible for any direction) */
+					if (target == xOther) {
+						if (pGrid[y][x].mirrorVertical() != pGrid[y][xOther].kind || detail::Towards(x, xOther) != xOther)
+							continue;
+
+						/* remove the removable rows and find the end of the loop */
+						size_t yRow = y;
+						bool xBaseExtend = false, xOtherExtend = false;
+						do {
+							size_t yNext = detail::Towards(yRow, yOther);
+
+							/* check if both can be reduced */
+							bool xBaseSimple = (pGrid[yNext][x].kind == detail::CellKind::vertical);
+							bool xOtherSimple = (pGrid[yNext][xOther].kind == detail::CellKind::vertical);
+							xBaseExtend = pGrid[yNext][x].anyCorner();
+							xOtherExtend = pGrid[yNext][xOther].anyCorner();
+							if (!(xBaseSimple || xBaseExtend) && !(xOtherSimple || xOtherExtend))
+								break;
+
+							/* apply the the fixes accordingly and advance the state */
+							pGrid[yNext][x].kind = (xBaseSimple ? detail::CellKind::empty : detail::CellKind::horizontal);
+							pGrid[yNext][xOther].kind = (xOtherSimple ? detail::CellKind::empty : detail::CellKind::horizontal);
+							yRow = yNext;
+						} while (!xBaseExtend && !xOtherExtend);
+
+						/* check if a change occurred and finalize it and mark the indented corner as dirty */
+						if (yRow != y) {
+							/* update the headder corners */
+							if (xBaseExtend)
+								pGrid[y][x].kind = detail::CellKind::empty;
+							else
+								std::swap(pGrid[yRow][x], pGrid[y][x]);
+							if (xOtherExtend)
+								pGrid[y][xOther].kind = detail::CellKind::empty;
+							else
+								std::swap(pGrid[yRow][xOther], pGrid[y][xOther]);
+
+							/* add the rect as change (before updating the corner lists as it invalidates the corner reference) */
+							pStraightenList.push_back(corner.tracked.rect);
+							dirty = true;
+
+							/* update the corners of the modified rows and invalidate the final row as it has now been modified */
+							fChangeUpdateRow(y, {});
+							fChangeUpdateRow(yRow, { std::min<size_t>(x, xOther), std::max<size_t>(x, xOther) });
+							pStraightenRows[yRow].tracked.rect = GridRect{};
+
+							/* continue the straightening after the current corner (due
+							*	to the list being ordered, it matches the next in line) */
+							for (i = 0; i < row.corners.size() && row.corners[i].x <= x; ++i);
+						}
+						continue;
+					}
 
 					/* check if this is an outwards movement and the other side sits on the other side of
 					*	the center, in which case the move needs to be skipped to prevent oscillations */
@@ -1028,6 +1084,7 @@ namespace ascg::detail {
 					}
 
 					/* remove the primary and update the other horizontal line */
+					bool endIsNode = pGrid[yOther][xOther].isNode();
 					for (size_t i : detail::MinMaxWalk{ xOther, target, true }) {
 						pGrid[y][i].kind = pGrid[y][i].removeHorizontal();
 						if (!endIsNode && i != xEnd)
@@ -1053,11 +1110,12 @@ namespace ascg::detail {
 
 					/* update the corners of the two modified rows (only the end-rows are affected by the corner
 					*	changes) and invalidate the other row, as it has now been modified and requires a re-scan */
-					fChangeUpdateRow(y, (target != x ? std::optional<size_t>{ target } : std::nullopt));
-					fChangeUpdateRow(yOther, (!endIsNode && target != xEnd ? std::optional<size_t>{ target } : std::nullopt));
+					fChangeUpdateRow(y, (target != x ? std::initializer_list<size_t>{ target } : std::initializer_list<size_t>{}));
+					fChangeUpdateRow(yOther, (!endIsNode && target != xEnd ? std::initializer_list<size_t>{ target } : std::initializer_list<size_t>{}));
 					pStraightenRows[yOther].tracked.rect = GridRect{};
 
-					/* continue the straightening after the current corner (due to the list being ordered, it matches the next in line) */
+					/* continue the straightening after the current corner (due
+					*	to the list being ordered, it matches the next in line) */
 					for (i = 0; i < row.corners.size() && row.corners[i].x <= x; ++i);
 				}
 			}
@@ -1218,6 +1276,10 @@ namespace ascg::detail {
 					/* resolve the surrounding indentation corner and check that no relevant target was found */
 					size_t xOther = point.x, yOther = point.y, xEnd = 0, target = 0;
 					if (!fMapIndentCorner(point.x, point.y, xOther, yOther, xEnd, target) || target != xOther)
+						continue;
+
+					/* check if its a self-loop, in which case it will be ignored (cannot be interlocked) */
+					if (cell.cornerTop() == (yOther < point.y))
 						continue;
 
 					/* check if there are any nodes in the way, in which case the interlocking cannot be removed and
