@@ -267,13 +267,13 @@ namespace ascg::detail {
 		}
 
 	private:
-		void fFillTraversals(detail::Row& row, std::vector<Slot>& slice, size_t begin, size_t end) const {
+		void fFillTraversals(detail::Row& row, const std::vector<Slot>& slice, size_t begin, size_t end) const {
 			for (size_t i = begin; i < end; ++i)
 				row.push_back(detail::Cell{ slice[i].used ? detail::CellKind::vertical : detail::CellKind::empty });
 		}
-		size_t fFlushArrows(size_t where, std::vector<Slot>& slice, bool top) {
-			/* check if the slice contains any errors in the given direction and clear the flags
-			*	(caller is responsible for ensuring that the node is the immediate neighbor) */
+		size_t fAddSliceEdge(size_t where, std::vector<Slot>& slice, bool top) {
+			/* check if the slice contains any arrows in the given direction (caller
+			*	is responsible for ensuring that the node is the immediate neighbor) */
 			bool hasArrows = false;
 			for (size_t i = 0; i < slice.size() && !hasArrows; ++i)
 				hasArrows = (slice[i].used && (top ? slice[i].top : slice[i].bottom));
@@ -284,7 +284,7 @@ namespace ascg::detail {
 			detail::Row& row = *pGrid.emplace(pGrid.begin() + where++);
 			row.reserve(slice.size());
 
-			/* iterate over the slice and add the arrow heads */
+			/* iterate over the slice and add the arrow heads and clear the flags */
 			for (size_t i = 0; i < slice.size(); ++i) {
 				if (!slice[i].used)
 					row.push_back(detail::Cell{ detail::CellKind::empty });
@@ -310,17 +310,21 @@ namespace ascg::detail {
 				detail::Row& row = *pGrid.emplace(pGrid.begin() + where++);
 				row.reserve(slice.size());
 
+				/* compute the range where the current rotation occurs */
+				size_t beginRotation = (leftwards ? begin - distance : end - 1);
+				size_t endRotation = (leftwards ? begin + 1 : end + distance);
+
 				/* add all traversals before the next rotation */
-				fFillTraversals(row, slice, 0, (leftwards ? begin - distance : end - 1));
+				fFillTraversals(row, slice, 0, beginRotation);
 
 				/* add the next rotation itself */
 				row.push_back(detail::Cell{ leftwards ? detail::CellKind::rightBottom : detail::CellKind::rightTop });
-				for (size_t i = 1; i < distance; ++i)
-					row.push_back(detail::Cell{ detail::CellKind::horizontal });
+				for (size_t i : detail::MinMaxWalk{ beginRotation, endRotation - 1, true })
+					row.push_back(detail::Cell{ slice[i].used ? detail::CellKind::crossing : detail::CellKind::horizontal });
 				row.push_back(detail::Cell{ leftwards ? detail::CellKind::leftTop : detail::CellKind::leftBottom });
 
 				/* add the traversals after the rotation and update the slice itself and the indices */
-				fFillTraversals(row, slice, (leftwards ? begin + 1 : end + distance), slice.size());
+				fFillTraversals(row, slice, endRotation, slice.size());
 				if (leftwards) {
 					std::swap(slice[begin], slice[begin - distance]);
 					++begin;
@@ -332,9 +336,10 @@ namespace ascg::detail {
 			}
 			return where;
 		}
-		size_t fInsertSliceCorrections(std::vector<Slot>& slice, size_t where) {
-			/* flush all of the initial arrows */
-			where = fFlushArrows(where, slice, true);
+		size_t fInsertSliceCorrections(std::vector<Slot>& slice, size_t where, bool flushEdges) {
+			/* write out the initial slice edges */
+			if (flushEdges)
+				where = fAddSliceEdge(where, slice, true);
 
 			/* find the next misplaced entry, which can be moved to its new placement (loop until they have all
 			*	been moved; must always find one, as the caller guarantees that the slice targets are possible) */
@@ -362,8 +367,10 @@ namespace ascg::detail {
 				}
 			}
 
-			/* flush all of the bottom arrows */
-			return fFlushArrows(where, slice, false);
+			/* write out the final slice edges */
+			if (flushEdges)
+				where = fAddSliceEdge(where, slice, false);
+			return where;
 		}
 		void fInsertNullRow(size_t index) {
 			detail::Row& row = *pGrid.emplace(pGrid.begin() + index);
@@ -454,7 +461,7 @@ namespace ascg::detail {
 
 				/* relocate the arrow-heads and insert the shifting */
 				relocateArrows(slice, prev, cur, false);
-				y = fInsertSliceCorrections(slice, y);
+				y = fInsertSliceCorrections(slice, y, true);
 			}
 
 			/* setup the slice to move the next entries (may invalidate references) */
@@ -481,7 +488,7 @@ namespace ascg::detail {
 
 				/* relocate the arrow-heads and insert the shifting */
 				relocateArrows(slice, cur, next, true);
-				fInsertSliceCorrections(slice, y + 1);
+				fInsertSliceCorrections(slice, y + 1, true);
 			}
 
 			/* shift the original row itself into position (after the previous and
@@ -597,29 +604,8 @@ namespace ascg::detail {
 			mapping = std::move(upcoming);
 			return slice;
 		}
-		void fConstructAddCrossing(std::vector<Slot>& slice, size_t index, size_t target) {
-			detail::Row& row = pGrid.emplace_back();
-			row.reserve(pGrid[0].size());
-			bool leftwards = (target < index);
-
-			/* add the traversals before the crossing */
-			fFillTraversals(row, slice, 0, std::min<size_t>(index, target));
-
-			/* add the crossing itself */
-			row.push_back(detail::Cell{ leftwards ? detail::CellKind::rightBottom : detail::CellKind::rightTop });
-			for (size_t i : detail::MinMaxWalk{ index, target, true })
-				row.push_back(detail::Cell{ slice[i].used ? detail::CellKind::crossing : detail::CellKind::horizontal });
-			row.push_back(detail::Cell{ leftwards ? detail::CellKind::leftTop : detail::CellKind::leftBottom });
-
-			/* add the traversals after the crossing and update the slice itself */
-			fFillTraversals(row, slice, std::max<size_t>(index, target) + 1, slice.size());
-			std::swap(slice[index], slice[target]);
-		}
 		void fConstructTransitions(std::vector<Slot>& slice) {
 			size_t numberOfRows = pGrid.size();
-
-			/* flush all of the initial arrows (before any crossings are inserted or applied) */
-			fFlushArrows(pGrid.size(), slice, true);
 
 			/* add all rotations and swaps to ensure the slice is in order */
 			while (true) {
@@ -671,7 +657,7 @@ namespace ascg::detail {
 					break;
 				bestCanMove = (bestMoveLeft ? (bestTarget > 0 && !slice[bestTarget - 1].used) : (bestTarget + 1 < slice.size() && !slice[bestTarget + 1].used));
 				if (bestCanMove) {
-					fConstructAddCrossing(slice, bestIndex, (bestMoveLeft ? bestTarget - 1 : bestTarget + 1));
+					fInsertRotation(slice, bestIndex, bestIndex + 1, (bestMoveLeft ? bestTarget - 1 : bestTarget + 1), pGrid.size());
 					continue;
 				}
 
@@ -711,13 +697,13 @@ namespace ascg::detail {
 				}
 
 				/* apply the final actual crossing */
-				fConstructAddCrossing(slice, bestIndex, bestTarget);
+				fInsertRotation(slice, bestIndex, bestIndex + 1, bestTarget, pGrid.size());
 			}
 
 			/* insert the remaining slice corrections until the slice is well-placed (must be possible, as
 			*	they are well-ordered and can all fit into the row, and any misplacement implies that there
 			*	must be empty spots to use for shifting; will automatically add any missing arrow heads) */
-			fInsertSliceCorrections(slice, pGrid.size());
+			fInsertSliceCorrections(slice, pGrid.size(), false);
 
 			/* ensure that at least one row was added, as otherwise two nodes may directly touch */
 			if (numberOfRows == pGrid.size()) {
