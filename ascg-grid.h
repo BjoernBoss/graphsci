@@ -1028,7 +1028,7 @@ namespace ascg::detail {
 							bool xOtherSimple = (pGrid[yNext][xOther].kind == detail::CellKind::vertical);
 							xBaseExtend = pGrid[yNext][x].anyCorner();
 							xOtherExtend = pGrid[yNext][xOther].anyCorner();
-							if (!(xBaseSimple || xBaseExtend) && !(xOtherSimple || xOtherExtend))
+							if (!(xBaseSimple || xBaseExtend) || !(xOtherSimple || xOtherExtend))
 								break;
 
 							/* apply the the fixes accordingly and advance the state */
@@ -1036,32 +1036,31 @@ namespace ascg::detail {
 							pGrid[yNext][xOther].kind = (xOtherSimple ? detail::CellKind::empty : detail::CellKind::horizontal);
 							yRow = yNext;
 						} while (!xBaseExtend && !xOtherExtend);
+						if (yRow == y)
+							continue;
 
-						/* check if a change occurred and finalize it and mark the indented corner as dirty */
-						if (yRow != y) {
-							/* update the headder corners */
-							if (xBaseExtend)
-								pGrid[y][x].kind = detail::CellKind::empty;
-							else
-								std::swap(pGrid[yRow][x], pGrid[y][x]);
-							if (xOtherExtend)
-								pGrid[y][xOther].kind = detail::CellKind::empty;
-							else
-								std::swap(pGrid[yRow][xOther], pGrid[y][xOther]);
+						/* update the header corners */
+						if (xBaseExtend)
+							pGrid[y][x].kind = detail::CellKind::empty;
+						else
+							std::swap(pGrid[yRow][x], pGrid[y][x]);
+						if (xOtherExtend)
+							pGrid[y][xOther].kind = detail::CellKind::empty;
+						else
+							std::swap(pGrid[yRow][xOther], pGrid[y][xOther]);
 
-							/* add the rect as change (before updating the corner lists as it invalidates the corner reference) */
-							pStraightenList.push_back(corner.tracked.rect);
-							dirty = true;
+						/* add the rect as change (before updating the corner lists as it invalidates the corner reference) */
+						pStraightenList.push_back(corner.tracked.rect);
+						dirty = true;
 
-							/* update the corners of the modified rows and invalidate the final row as it has now been modified */
-							fChangeUpdateRow(y, {});
-							fChangeUpdateRow(yRow, { std::min<size_t>(x, xOther), std::max<size_t>(x, xOther) });
-							pStraightenRows[yRow].tracked.rect = GridRect{};
+						/* update the corners of the modified rows and invalidate the final row as it has now been modified */
+						fChangeUpdateRow(y, {});
+						fChangeUpdateRow(yRow, { std::min<size_t>(x, xOther), std::max<size_t>(x, xOther) });
+						pStraightenRows[yRow].tracked.rect = GridRect{};
 
-							/* continue the straightening after the current corner (due
-							*	to the list being ordered, it matches the next in line) */
-							for (i = 0; i < row.corners.size() && row.corners[i].x <= x; ++i);
-						}
+						/* continue the straightening after the current corner (due
+						*	to the list being ordered, it matches the next in line) */
+						for (i = 0; i < row.corners.size() && row.corners[i].x <= x; ++i);
 						continue;
 					}
 
@@ -1261,6 +1260,37 @@ namespace ascg::detail {
 			pGrid[ySpacer][xSpacer].kind = pGrid[ySpacer][xSpacer].removeVertical();
 			pGrid[yDetour][xSpacer].kind = detail::Cell{ kindDetour }.mirrorFull();
 		}
+		bool fFixIsSelfLoopBlock(size_t xBase, size_t yBase, size_t xBlock, size_t yBlock) const {
+			/* check if the blocker is a self-loop immediately next to the base axis and for the same node */
+			if (!pGrid[yBase][xBase].isNode() || !pGrid[yBase][xBlock].isNode())
+				return false;
+			if ((xBase < xBlock) ? !pGrid[yBlock][xBlock].cornerRight() : !pGrid[yBlock][xBlock].cornerLeft())
+				return false;
+
+			/* chcek if its a well-formed single spaced self-loop */
+			if (pGrid[yBlock][xBlock].mirrorVertical() != pGrid[yBlock][detail::AwayFrom(xBlock, xBase)].kind)
+				return false;
+			return true;
+		}
+		void fFixSelfLoopBlock(size_t xBase, size_t yBase, size_t xBlock, size_t yBlock) {
+			/* insert a null-row above the self-loop, used to redirect the base transition */
+			size_t yNull = (yBlock < yBase ? yBlock : yBlock + 1);
+			fInsertNullRow(yNull);
+			if (yNull == yBlock)
+				++yBlock, ++yBase;
+
+			/* insert the redirection transition */
+			size_t xLoop = detail::AwayFrom(xBlock, xBase);
+			pGrid[yNull][xBase].kind = pGrid[yBlock][xBlock].mirrorHorizontal();
+			pGrid[yNull][xBlock].kind = detail::CellKind::horizontal;
+			pGrid[yNull][xLoop].kind = pGrid[yBlock][xLoop].kind;
+
+			/* rotate the axes through */
+			for (size_t yRow = yBlock; yRow != yBase; yRow = detail::Towards(yRow, yBase)) {
+				std::swap(pGrid[yRow][xBase], pGrid[yRow][xBlock]);
+				std::swap(pGrid[yRow][xBlock], pGrid[yRow][xLoop]);
+			}
+		}
 		bool fFixInterlocks(bool leftwards, GridPoint& point, size_t& appliedInterlockHash) {
 			/* find the next corner to pursue (iterate until one has been found or all have been checked) */
 			for (; point.y < pGrid.size(); point.x = 0, ++point.y) {
@@ -1366,6 +1396,14 @@ namespace ascg::detail {
 						if (isFixBlocked())
 							continue;
 						fFixSingleCornerBlock(xOther, yOther, xEnd, point.y, xCorner, yOtherCorner);
+						return true;
+					}
+
+					/* check if the blocker is a self-loop */
+					if (!multiple && fFixIsSelfLoopBlock(xOther, yOther, xCorner, yBaseCorner)) {
+						if (isFixBlocked())
+							continue;
+						fFixSelfLoopBlock(xOther, yOther, xCorner, yBaseCorner);
 						return true;
 					}
 				}
