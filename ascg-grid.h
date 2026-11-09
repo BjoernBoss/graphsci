@@ -846,7 +846,7 @@ namespace ascg::detail {
 			}
 			return count;
 		}
-		bool fMapIndentCorner(size_t x, size_t y, size_t& xOther, size_t& yOther, size_t& xEnd, size_t& target) const {
+		bool fMapIndentCorner(size_t x, size_t y, size_t& xOther, size_t& yOther, size_t& xEnd) const {
 			const detail::Cell& cell = pGrid[y][x];
 
 			/* find the other corner of this construct (i.e. after moving horizontal and vertical again, the endpoint) */
@@ -870,15 +870,20 @@ namespace ascg::detail {
 					return false;
 			}
 
-			/* check if the vertical run already sits on the node cell closest
-			*	to the primary corner and can therefore not be moved further */
+			/* ensure that the vertical run does not already sit on the node cell
+			*	closest to the primary corner and can therefore not be moved further */
 			if (endIsNode && xEnd == xOther)
 				return false;
+			return true;
+		}
+		size_t fFindTargetAxis(size_t x, size_t y, size_t xOther, size_t yOther, size_t xEnd) const {
+			bool endIsNode = pGrid[yOther][xOther].isNode();
+			size_t target = 0;
 
 			/* initialize the target axis depending on the end being a node or this being
 			*	a self-loop (to prevent node-overrunning or self-loop self-cancellation) */
 			target = (endIsNode ? xEnd : x);
-			if (cell.cornerTop() == (yOther < y))
+			if (pGrid[y][x].cornerTop() == (yOther < y))
 				target = detail::Towards(target, xOther);
 
 			/* find the target axis to reduce the indentation by */
@@ -923,7 +928,7 @@ namespace ascg::detail {
 					break;
 				target = detail::Towards(target, xOther);
 			}
-			return true;
+			return target;
 		}
 		bool fChangeCheckOutdated(TrackedRect& tracked) const {
 			/* check if the rectangle itself is not yet valid */
@@ -996,8 +1001,8 @@ namespace ascg::detail {
 
 					/* resolve the indentation corner and setup the rectangle of all
 					*	cells inspected by the given indentation-check operation */
-					size_t xOther = x, yOther = y, xEnd = x, target = 0;
-					bool valid = fMapIndentCorner(x, y, xOther, yOther, xEnd, target);
+					size_t xOther = x, yOther = y, xEnd = x;
+					bool valid = fMapIndentCorner(x, y, xOther, yOther, xEnd);
 					corner.tracked = {
 						.rect = GridRect{
 							.left = std::min<size_t>({ x, xOther, xEnd }), .top = std::min<size_t>(y, yOther),
@@ -1010,6 +1015,9 @@ namespace ascg::detail {
 					/* check if a valid indentation rectangle has been found */
 					if (!valid)
 						continue;
+
+					/* find the target axis used for a potential reduction */
+					size_t target = fFindTargetAxis(x, y, xOther, yOther, xEnd);
 
 					/* check if no immediate target axis was found, in which case it
 					*	might be a reducible self-loop strip (possible for any direction) */
@@ -1303,9 +1311,9 @@ namespace ascg::detail {
 					if (!(leftwards ? cell.cornerRight() : cell.cornerLeft()))
 						continue;
 
-					/* resolve the surrounding indentation corner and check that no relevant target was found */
-					size_t xOther = point.x, yOther = point.y, xEnd = 0, target = 0;
-					if (!fMapIndentCorner(point.x, point.y, xOther, yOther, xEnd, target) || target != xOther)
+					/* resolve the surrounding indentation corner */
+					size_t xOther = point.x, yOther = point.y, xEnd = 0;
+					if (!fMapIndentCorner(point.x, point.y, xOther, yOther, xEnd))
 						continue;
 
 					/* check if its a self-loop, in which case it will be ignored (cannot be interlocked) */
