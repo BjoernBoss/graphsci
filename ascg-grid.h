@@ -1326,17 +1326,19 @@ namespace ascg::detail {
 					*	otherwise look for the blocking corners closest to base and the other corner (arrow-heads are
 					*	not considered blocks, as fixes only interact with corners and will preserve the arrows) */
 					size_t xCorner = detail::Towards(xOther, point.x), yBaseCorner = pGrid.size(), yOtherCorner = pGrid.size();
-					bool blockedTransition = false;
+					bool blockedTransition = false, parallelTransition = true;
 					for (size_t i : detail::MinMaxWalk{ point.y, yOther, true }) {
 						if (pGrid[i][xCorner].isNode()) {
 							blockedTransition = true;
 							break;
 						}
-						if (!pGrid[i][xCorner].anyCorner())
-							continue;
-						if (yBaseCorner == pGrid.size())
-							yBaseCorner = i;
-						yOtherCorner = i;
+						if (pGrid[i][xCorner].anyCorner()) {
+							if (yBaseCorner == pGrid.size())
+								yBaseCorner = i;
+							yOtherCorner = i;
+						}
+						else if (!pGrid[i][xCorner].lineVertical())
+							parallelTransition = false;
 					}
 					if (blockedTransition)
 						continue;
@@ -1348,9 +1350,13 @@ namespace ascg::detail {
 						return pFailedFixes.contains(appliedInterlockHash);
 					};
 
-					/* check if no corner has been found, i.e. the blocker runs along the entire vertical run, in which case
-					*	the two lines can only be swapped, which is possible if they end in the same node or cross each other */
+					/* check if no corner has been found, i.e. a potentiall blocker runs along the entire vertical run, in which
+					*	case the two lines can only be swapped, which is possible if they end in the same node or cross each other */
 					if (yBaseCorner == pGrid.size()) {
+						/* check if there was a fully parallel blocker */
+						if (!parallelTransition)
+							continue;
+
 						/* check if both end in the same node, in which case the transitions can be swapped (if the transitions head
 						*	into the node differs, it needs to be swapped as well, to ensure each transitions gets its correct head back) */
 						if (pGrid[yOther][xCorner].isNode() && pGrid[yOther][xOther].isNode()) {
