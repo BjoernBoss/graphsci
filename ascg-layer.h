@@ -184,12 +184,12 @@ namespace ascg::detail {
 			backwards
 		};
 		struct Strand {
-			size_t start = 0;
-			size_t end = 0;
+			size_t first = 0;
+			size_t last = 0;
 			bool operator<(const Strand& other) const {
-				if (start != other.start)
-					return (start < other.start);
-				return (end < other.end);
+				if (first != other.first)
+					return (first < other.first);
+				return (last < other.last);
 			}
 		};
 		struct Preferred {
@@ -201,10 +201,17 @@ namespace ascg::detail {
 				return (index < other.index);
 			}
 		};
+		struct BuildEdge {
+			/* remove prev/next/other from layout, and only keep in internal state? */
+			size_t first = 0;
+			size_t last = 0;
+			/* test larger is outwards in getOutwards */
+		};
 
 	private:
 		const detail::Ranges& pRanges;
 		detail::LayerState pLayerGraph;
+		std::vector<BuildEdge> pEdges;
 
 	public:
 		LayerBuilder(const detail::Ranges& ranges) : pRanges{ ranges } {}
@@ -323,70 +330,154 @@ namespace ascg::detail {
 			pLayerGraph.layers.clear();
 			pLayerGraph.edges.clear();
 
-			/* setup the map of all ranges to their edge (sorted by
-			*	their start; guarantee at most one range per edge) */
-			std::map<Strand, size_t> open;
-			std::vector<size_t> edgeEnd;
+			/* iterate over the ranges and select all relevant edges (first occurrence
+			*	for each) and update the edge states accordingly and setup the node map */
+			std::set<Strand> edges;
+			std::map<size_t, size_t> nodes;
 			for (size_t i = 0; i < pRanges.size(); ++i) {
-				Strand strand = Strand{ .start = pRanges[i].first, .end = pRanges[i].last };
-				if (auto it = open.find(strand); it == open.end()) {
-					open.insert({ strand, pLayerGraph.edges.size() });
-					pLayerGraph.edges.push_back(detail::Edge{ .headFirst = pRanges[i].headFirst, .headLast = pRanges[i].headLast });
-					edgeEnd.push_back(strand.end);
+				Strand strand = Strand{ .first = pRanges[i].first, .last = pRanges[i].last };
+				if (!edges.insert(strand).second)
+					continue;
+
+				/* add the range to the list of edges */
+				pLayerGraph.edges.push_back(detail::Edge{ .headFirst = pRanges[i].headFirst, .headLast = pRanges[i].headLast });
+				pEdges.push_back(BuildEdge{ .first = strand.first, .last = strand.last });
+
+				/* update the node list */
+				nodes[strand.first] = 0;
+				nodes[strand.last] = 0;
+			}
+
+			/* iterate over the nodes and create the layers for each node */
+			for (auto& [index, layer] : nodes) {
+				layer = pLayerGraph.layers.size();
+				pLayerGraph.layers.push_back(detail::Layer{ .index = index, .selfEdge = pLayerGraph.edges.size() });
+			}
+
+			/* iterate over the edges again and patch them up to point to the layer index and register self-loops */
+			for (size_t i = 0; i < pEdges.size(); ++i) {
+				BuildEdge& edge = pEdges[i];
+				edge.first = nodes[edge.first];
+				edge.last = nodes[edge.last];
+				if (edge.first == edge.last)
+					pLayerGraph.layers[edge.first].selfEdge = i;
+			}
+
+			/* collect the overlap between the edges (used to select the side each edge will
+			*	be inserted on) and the list of all relevant edges, which cross one layer */
+			std::vector<std::vector<size_t>> overlap(pEdges.size());
+			std::vector<size_t> relevant;
+			for (size_t i = 0; i < pEdges.size(); ++i) {
+				/* ensure that the edge at least spans one layer */
+				size_t f0 = pEdges[i].first, l0 = pEdges[i].last;
+				if (l0 - f0 <= 1)
+					continue;
+				relevant.push_back(i);
+
+				/* find all other edges, which may overlap */
+				for (size_t j = i + 1; j < pEdges.size(); ++j) {
+					size_t f1 = pEdges[j].first, l1 = pEdges[j].last;
+					if (l1 - f1 <= 1)
+						continue;
+
+					/* check if the edges truly overlap */
+					if ((f0 < f1 && f1 < l0 && l0 < l1) || (f1 < f0 && f0 < l1 && l1 < l0)) {
+						overlap[i].push_back(j);
+						overlap[j].push_back(i);
+					}
 				}
 			}
 
-			/* setup the overall layers and nodes and traverse points */
-			std::optional<size_t> layerNext = open.begin()->first.start;
-			while (layerNext.has_value()) {
-				/* setup the next layer with the node at index 0 */
-				detail::Layer& layer = pLayerGraph.layers.emplace_back(detail::Layer{ .index = *layerNext, .selfEdge = pLayerGraph.edges.size() });
-				layer.points.push_back(detail::Point{ .body = detail::Node{} });
-				layerNext = std::nullopt;
+			/* assign each relevant edge a side (greedy assignment) where it encounters the fewest overlapping
+			*	conflicts (longest first as they affect others most; ties and conflict-free strands go to the right) */
+			std::vector<int8_t> side(pEdges.size(), 0);
+			std::sort(relevant.begin(), relevant.end(), [&edges = pEdges](size_t a, size_t b) {
+				return (edges[a].last - edges[a].first) > (edges[b].last - edges[b].first);
+			});
+			const auto getConflicts = [&overlap, &side](size_t edge) -> intptr_t {
+				intptr_t sum = 0;
+				for (size_t other : overlap[edge])
+					sum += side[other];
+				return sum;
+			};
+			for (size_t edge : relevant)
+				side[edge] = (getConflicts(edge) > 0 ? -1 : 1);
 
-				/* insert all edges which start at the current layer and update
-				*	the next layer index and check if a self-loop is part of it */
-				auto itNext = open.begin();
-				while (!open.empty() && itNext->first.start == layer.index) {
-					if (itNext->first.start == itNext->first.end)
-						layer.selfEdge = itNext->second;
+			/* reduce the side selection conflicts by flipping edges, which
+			*	lie on the side of most of their conflicts (strictly monotonic) */
+			for (bool changed = true; changed;) {
+				changed = false;
+				for (size_t edge : relevant) {
+					if (getConflicts(edge) * side[edge] > 0)
+						side[edge] = -side[edge], changed = true;
+				}
+			}
+
+			/* helper to determine which edge is further outwards (earlier start is outwards, on equal starts, later end is outwards) */
+			const auto testIsOuter = [&edges = pEdges](size_t test, size_t other) -> bool {
+				if (edges[test].first != edges[other].first)
+					return (edges[test].first < edges[other].first);
+				return (edges[test].last > edges[other].last);
+			};
+
+			/* construct the points per layer with all edges on side (<0) on
+			*	the left of the node, and all other edges on the right */
+			std::vector<size_t> left, right, endpoint;
+			for (size_t i = 0; i < pLayerGraph.layers.size(); ++i) {
+				left.clear(), right.clear(), endpoint.clear();
+
+				/* collect all of the edges, which start/end at the layer or pass it on either side */
+				for (size_t j = 0; j < pEdges.size(); ++j) {
+					if (j == pLayerGraph.layers[i].selfEdge)
+						continue;
+					if (pEdges[j].first == i || pEdges[j].last == i)
+						endpoint.push_back(j);
+					else if (pEdges[j].first < i && i < pEdges[j].last)
+						(side[j] < 0 ? left : right).push_back(j);
+				}
+
+				/* sort the sides from outwards to inwards (i.e. by nesting level towards the node) */
+				std::sort(left.begin(), left.end(), testIsOuter);
+				std::sort(right.begin(), right.end(), [&testIsOuter](size_t a, size_t b) { return testIsOuter(b, a); });
+
+				/* construct the layer points themselves */
+				detail::Layer& layer = pLayerGraph.layers[i];
+				layer.points.reserve(left.size() + right.size() + 1);
+				for (size_t edge : left)
+					layer.points.push_back(detail::Point{ .body = detail::Traverse{.edge = edge} });
+				detail::Node& node = layer.points.emplace_back(detail::Point{ .body = detail::Node{} }).node();
+				for (size_t edge : endpoint)
+					(pEdges[edge].first == i ? node.start : node.end).push(detail::Endpoint{ .edge = edge });
+				for (size_t edge : right)
+					layer.points.push_back(detail::Point{ .body = detail::Traverse{.edge = edge} });
+			}
+
+			/* link up all of the layers */
+			std::unordered_map<size_t, std::pair<size_t, size_t*>> mapping;
+			for (detail::Layer& layer : pLayerGraph.layers) {
+				std::unordered_map<size_t, std::pair<size_t, size_t*>> current;
+
+				for (size_t i = 0; i < layer.points.size(); ++i) {
+					detail::Point& point = layer.points[i];
+					if (detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
+						current[traverse->edge] = { i, &traverse->next };
+						auto [index, other] = mapping[traverse->edge];
+						traverse->prev = index;
+						*other = i;
+					}
 					else {
-						layer.points[0].node().start.push({ .edge = itNext->second });
-						if (!layerNext.has_value() || itNext->first.end < *layerNext)
-							layerNext = itNext->first.end;
+						detail::Node& node = point.node();
+						for (detail::Endpoint& ep : node.end) {
+							auto [index, other] = mapping[ep.edge];
+							ep.other = index;
+							*other = i;
+						}
+						for (detail::Endpoint& ep : node.start)
+							current[ep.edge] = { i, &ep.other };
 					}
-					itNext = open.erase(itNext);
 				}
 
-				/* check if the start of the next layer is lower than any end of the inserted edges */
-				if (!open.empty() && (!layerNext.has_value() || itNext->first.start < *layerNext))
-					layerNext = itNext->first.start;
-
-				/* check if the previous layer exists in order to be linked up */
-				if (pLayerGraph.layers.size() <= 1)
-					continue;
-
-				/* helper to connect an edge to the top layer and ensure proper linkage between the
-				*	layers and to ensure the next assumed layer respects all currently open endings */
-				const auto addEdge = [&edgeEnd, &layer, &layerNext](size_t edge, size_t index) -> size_t {
-					if (edgeEnd[edge] == layer.index) {
-						layer.points[0].node().end.push({ .edge = edge, .other = index });
-						return 0;
-					}
-					layer.points.push_back(detail::Point{ .body = detail::Traverse{.edge = edge, .prev = index} });
-					if (!layerNext.has_value() || edgeEnd[edge] < *layerNext)
-						layerNext = edgeEnd[edge];
-					return layer.points.size() - 1;
-				};
-
-				/* iterate over the previous layer and extend it into the current layer */
-				std::vector<detail::Point>& previous = pLayerGraph.layers[pLayerGraph.layers.size() - 2].points;
-				for (size_t i = 0; i < previous.size(); ++i) {
-					if (auto* traverse = previous[i].isTraverse(); traverse != nullptr)
-						traverse->next = addEdge(traverse->edge, i);
-					else for (detail::Endpoint& ep : previous[i].node().start)
-						ep.other = addEdge(ep.edge, i);
-				}
+				mapping = std::move(current);
 			}
 		}
 		bool fReorderLayer(size_t index, Direction direction) {
@@ -487,9 +578,9 @@ namespace ascg::detail {
 			/* perform a full sweep by moving down the layers first and then back up (always adjust against
 			*	either the neighbors in both directions or the direction-based previous neighbors) */
 			for (size_t i = 1; i < pLayerGraph.layers.size(); ++i)
-				changed = (fReorderLayer(i, bidirectional ? Direction::bidirectional : Direction::backwards) || changed);
+				changed = (fReorderLayer(i, (bidirectional ? Direction::bidirectional : Direction::backwards)) || changed);
 			for (size_t i = pLayerGraph.layers.size() - 1; i > 0; --i)
-				changed = (fReorderLayer(i - 1, bidirectional ? Direction::bidirectional : Direction::forwards) || changed);
+				changed = (fReorderLayer(i - 1, (bidirectional ? Direction::bidirectional : Direction::forwards)) || changed);
 			return changed;
 		}
 		bool fShiftLayers() {
