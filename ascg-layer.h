@@ -170,7 +170,8 @@ namespace ascg::detail {
 	};
 
 	/* Order the points of every layer to minimize the crossings between neighboring layers:
-	*	1.	construct the initial layers with the node in the first slot and the traversals passed through
+	*	1.	construct the initial layers by sorting the edges onto either side of the
+	*		node (while trying to reduce potential crossings between overlapping edges)
 	*	2.	repeat: barycenter sweep down and up the layers, then shift every point to its crossing-minimal
 	*		position, until the order settles or repeats itself, while keeping the best order seen (given that
 	*		barycenter is not monotonic, the states are recorded to detect cycles and abort ocilating movements)
@@ -202,16 +203,13 @@ namespace ascg::detail {
 			}
 		};
 		struct BuildEdge {
-			/* remove prev/next/other from layout, and only keep in internal state? */
 			size_t first = 0;
 			size_t last = 0;
-			/* test larger is outwards in getOutwards */
 		};
 
 	private:
 		const detail::Ranges& pRanges;
 		detail::LayerState pLayerGraph;
-		std::vector<BuildEdge> pEdges;
 
 	public:
 		LayerBuilder(const detail::Ranges& ranges) : pRanges{ ranges } {}
@@ -310,8 +308,8 @@ namespace ascg::detail {
 					hasher.add(point.isTraverse() != nullptr ? point.traverse().edge + 1 : 0);
 
 					/* iterate over the upcoming points and compute the crossings with this point */
-					for (size_t k = i + 1; k < layer.points.size(); ++k) {
-						const detail::Point& other = layer.points[k];
+					for (size_t j = i + 1; j < layer.points.size(); ++j) {
+						const detail::Point& other = layer.points[j];
 						if (const detail::Traverse* traverse = other.isTraverse(); traverse != nullptr)
 							addCrossings(point, traverse->prev);
 						else for (const detail::Endpoint& ep : other.node().end)
@@ -332,16 +330,17 @@ namespace ascg::detail {
 
 			/* iterate over the ranges and select all relevant edges (first occurrence
 			*	for each) and update the edge states accordingly and setup the node map */
-			std::set<Strand> edges;
 			std::map<size_t, size_t> nodes;
+			std::vector<BuildEdge> edges;
+			std::set<Strand> seen;
 			for (size_t i = 0; i < pRanges.size(); ++i) {
 				Strand strand = Strand{ .first = pRanges[i].first, .last = pRanges[i].last };
-				if (!edges.insert(strand).second)
+				if (!seen.insert(strand).second)
 					continue;
 
 				/* add the range to the list of edges */
 				pLayerGraph.edges.push_back(detail::Edge{ .headFirst = pRanges[i].headFirst, .headLast = pRanges[i].headLast });
-				pEdges.push_back(BuildEdge{ .first = strand.first, .last = strand.last });
+				edges.push_back(BuildEdge{ .first = strand.first, .last = strand.last });
 
 				/* update the node list */
 				nodes[strand.first] = 0;
@@ -355,8 +354,8 @@ namespace ascg::detail {
 			}
 
 			/* iterate over the edges again and patch them up to point to the layer index and register self-loops */
-			for (size_t i = 0; i < pEdges.size(); ++i) {
-				BuildEdge& edge = pEdges[i];
+			for (size_t i = 0; i < edges.size(); ++i) {
+				BuildEdge& edge = edges[i];
 				edge.first = nodes[edge.first];
 				edge.last = nodes[edge.last];
 				if (edge.first == edge.last)
@@ -365,18 +364,18 @@ namespace ascg::detail {
 
 			/* collect the overlap between the edges (used to select the side each edge will
 			*	be inserted on) and the list of all relevant edges, which cross one layer */
-			std::vector<std::vector<size_t>> overlap(pEdges.size());
+			std::vector<std::vector<size_t>> overlap(edges.size());
 			std::vector<size_t> relevant;
-			for (size_t i = 0; i < pEdges.size(); ++i) {
+			for (size_t i = 0; i < edges.size(); ++i) {
 				/* ensure that the edge at least spans one layer */
-				size_t f0 = pEdges[i].first, l0 = pEdges[i].last;
+				size_t f0 = edges[i].first, l0 = edges[i].last;
 				if (l0 - f0 <= 1)
 					continue;
 				relevant.push_back(i);
 
 				/* find all other edges, which may overlap */
-				for (size_t j = i + 1; j < pEdges.size(); ++j) {
-					size_t f1 = pEdges[j].first, l1 = pEdges[j].last;
+				for (size_t j = i + 1; j < edges.size(); ++j) {
+					size_t f1 = edges[j].first, l1 = edges[j].last;
 					if (l1 - f1 <= 1)
 						continue;
 
@@ -390,8 +389,8 @@ namespace ascg::detail {
 
 			/* assign each relevant edge a side (greedy assignment) where it encounters the fewest overlapping
 			*	conflicts (longest first as they affect others most; ties and conflict-free strands go to the right) */
-			std::vector<int8_t> side(pEdges.size(), 0);
-			std::sort(relevant.begin(), relevant.end(), [&edges = pEdges](size_t a, size_t b) {
+			std::vector<int8_t> side(edges.size(), 0);
+			std::sort(relevant.begin(), relevant.end(), [&edges](size_t a, size_t b) {
 				return (edges[a].last - edges[a].first) > (edges[b].last - edges[b].first);
 			});
 			const auto getConflicts = [&overlap, &side](size_t edge) -> intptr_t {
@@ -413,8 +412,9 @@ namespace ascg::detail {
 				}
 			}
 
-			/* helper to determine which edge is further outwards (earlier start is outwards, on equal starts, later end is outwards) */
-			const auto testIsOuter = [&edges = pEdges](size_t test, size_t other) -> bool {
+			/* helper to determine which edge is further outwards (earlier
+			*	start is outwards, on equal starts, later end is outwards) */
+			const auto testIsOuter = [&edges](size_t test, size_t other) -> bool {
 				if (edges[test].first != edges[other].first)
 					return (edges[test].first < edges[other].first);
 				return (edges[test].last > edges[other].last);
@@ -427,12 +427,12 @@ namespace ascg::detail {
 				left.clear(), right.clear(), endpoint.clear();
 
 				/* collect all of the edges, which start/end at the layer or pass it on either side */
-				for (size_t j = 0; j < pEdges.size(); ++j) {
+				for (size_t j = 0; j < edges.size(); ++j) {
 					if (j == pLayerGraph.layers[i].selfEdge)
 						continue;
-					if (pEdges[j].first == i || pEdges[j].last == i)
+					if (edges[j].first == i || edges[j].last == i)
 						endpoint.push_back(j);
-					else if (pEdges[j].first < i && i < pEdges[j].last)
+					else if (edges[j].first < i && i < edges[j].last)
 						(side[j] < 0 ? left : right).push_back(j);
 				}
 
@@ -447,36 +447,41 @@ namespace ascg::detail {
 					layer.points.push_back(detail::Point{ .body = detail::Traverse{.edge = edge} });
 				detail::Node& node = layer.points.emplace_back(detail::Point{ .body = detail::Node{} }).node();
 				for (size_t edge : endpoint)
-					(pEdges[edge].first == i ? node.start : node.end).push(detail::Endpoint{ .edge = edge });
+					(edges[edge].first == i ? node.start : node.end).push(detail::Endpoint{ .edge = edge });
 				for (size_t edge : right)
 					layer.points.push_back(detail::Point{ .body = detail::Traverse{.edge = edge} });
 			}
 
-			/* link up all of the layers */
+			/* helper to link a point to the previous layer */
 			std::unordered_map<size_t, std::pair<size_t, size_t*>> mapping;
+			const auto linkPoint = [&mapping](size_t edge, size_t& self, size_t index) -> void {
+				std::pair<size_t, size_t*> entry = mapping[edge];
+				self = entry.first;
+				*entry.second = index;
+			};
+
+			/* setup the links between the separate layers */
 			for (detail::Layer& layer : pLayerGraph.layers) {
 				std::unordered_map<size_t, std::pair<size_t, size_t*>> current;
 
+				/* iterate over the points of the current layer and link them to
+				*	the previous layer and update the map for the upcoming layer */
 				for (size_t i = 0; i < layer.points.size(); ++i) {
 					detail::Point& point = layer.points[i];
 					if (detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
 						current[traverse->edge] = { i, &traverse->next };
-						auto [index, other] = mapping[traverse->edge];
-						traverse->prev = index;
-						*other = i;
+						linkPoint(traverse->edge, traverse->prev, i);
 					}
 					else {
 						detail::Node& node = point.node();
-						for (detail::Endpoint& ep : node.end) {
-							auto [index, other] = mapping[ep.edge];
-							ep.other = index;
-							*other = i;
-						}
+						for (detail::Endpoint& ep : node.end)
+							linkPoint(ep.edge, ep.other, i);
 						for (detail::Endpoint& ep : node.start)
 							current[ep.edge] = { i, &ep.other };
 					}
 				}
 
+				/* replace the mapping (of the previous layer) with the current next layer */
 				mapping = std::move(current);
 			}
 		}

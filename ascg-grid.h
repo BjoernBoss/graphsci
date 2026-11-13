@@ -522,9 +522,9 @@ namespace ascg::detail {
 			const detail::Layer& layer = pLayers.layers[index];
 			NodeState out;
 
-			/* helper to collect the endpoint edges and sort them by their
-			*	other side (the other-side ordering is preserved into the grid) */
-			const auto sortEndpoints = [](const detail::Endpoints& eps) -> std::vector<size_t> {
+			/* helper to collect the endpoint edges sorted by their other
+			*	side (the other-side ordering is preserved into the grid) */
+			const auto sortedEndpoints = [](const detail::Endpoints& eps) -> std::vector<size_t> {
 				const detail::Endpoint* list = eps.begin();
 				std::vector<size_t> out;
 
@@ -557,9 +557,9 @@ namespace ascg::detail {
 
 				/* update the indices for the starting and ending nodes */
 				size_t startIndex = slotIndex, endIndex = slotIndex;
-				for (size_t edge : sortEndpoints(node.start))
+				for (size_t edge : sortedEndpoints(node.start))
 					out.map[edge] = startIndex++;
-				for (size_t edge : sortEndpoints(node.end))
+				for (size_t edge : sortedEndpoints(node.end))
 					out.map[edge] = endIndex++;
 
 				/* allocate the additional slot for the self-loop (only its start
