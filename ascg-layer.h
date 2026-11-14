@@ -388,9 +388,10 @@ namespace ascg::detail {
 			}
 
 			/* assign each relevant edge a side (greedy assignment) where it encounters the fewest overlapping
-			*	conflicts (longest first as they affect others most; ties and conflict-free strands go to the right) */
+			*	conflicts (longest first as they affect others most; ties and conflict-free strands go to the
+			*	right; stable_sort for consistent graph results independent on sorting algorithm) */
 			std::vector<int8_t> side(edges.size(), 0);
-			std::sort(relevant.begin(), relevant.end(), [&edges](size_t a, size_t b) {
+			std::stable_sort(relevant.begin(), relevant.end(), [&edges](size_t a, size_t b) {
 				return (edges[a].last - edges[a].first) > (edges[b].last - edges[b].first);
 			});
 			const auto getConflicts = [&overlap, &side](size_t edge) -> intptr_t {
@@ -412,12 +413,12 @@ namespace ascg::detail {
 				}
 			}
 
-			/* helper to determine which edge is further outwards (earlier
-			*	start is outwards, on equal starts, later end is outwards) */
-			const auto testIsOuter = [&edges](size_t test, size_t other) -> bool {
-				if (edges[test].first != edges[other].first)
-					return (edges[test].first < edges[other].first);
-				return (edges[test].last > edges[other].last);
+			/* helper to determine which edge is further outwards (later
+			*	end is outwards, on equal ends, earlier start is outwards) */
+			const auto sortByOuter = [&edges](size_t test, size_t other) -> bool {
+				if (edges[test].last != edges[other].last)
+					return (edges[test].last > edges[other].last);
+				return (edges[test].first < edges[other].first);
 			};
 
 			/* construct the points per layer with all edges on side (<0) on
@@ -437,8 +438,8 @@ namespace ascg::detail {
 				}
 
 				/* sort the sides from outwards to inwards (i.e. by nesting level towards the node) */
-				std::sort(left.begin(), left.end(), testIsOuter);
-				std::sort(right.begin(), right.end(), [&testIsOuter](size_t a, size_t b) { return testIsOuter(b, a); });
+				std::sort(left.begin(), left.end(), sortByOuter);
+				std::sort(right.begin(), right.end(), [&sortByOuter](size_t a, size_t b) { return sortByOuter(b, a); });
 
 				/* construct the layer points themselves */
 				detail::Layer& layer = pLayerGraph.layers[i];
