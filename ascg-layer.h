@@ -155,8 +155,9 @@ namespace ascg::detail {
 			return std::get<detail::Node>(body);
 		}
 	};
+	using Points = std::vector<detail::Point>;
 	struct Layer {
-		std::vector<detail::Point> points;
+		detail::Points points;
 		size_t index = 0;
 		size_t selfEdge = 0;
 	};
@@ -205,11 +206,18 @@ namespace ascg::detail {
 		struct BuildEdge {
 			size_t first = 0;
 			size_t last = 0;
+			size_t stamp = 0;
+		};
+		struct StrandPath {
+			std::vector<size_t> steps;
+			size_t crossings = 0;
+			float drift = 0;
 		};
 
 	private:
 		const detail::Ranges& pRanges;
 		detail::LayerState pLayerGraph;
+		std::vector<BuildEdge> pEdges;
 
 	public:
 		LayerBuilder(const detail::Ranges& ranges) : pRanges{ ranges } {}
@@ -327,11 +335,11 @@ namespace ascg::detail {
 		void fConstructLayers() {
 			pLayerGraph.layers.clear();
 			pLayerGraph.edges.clear();
+			pEdges.clear();
 
 			/* iterate over the ranges and select all relevant edges (first occurrence
 			*	for each) and update the edge states accordingly and setup the node map */
 			std::map<size_t, size_t> nodes;
-			std::vector<BuildEdge> edges;
 			std::set<Strand> seen;
 			for (size_t i = 0; i < pRanges.size(); ++i) {
 				Strand strand = Strand{ .first = pRanges[i].first, .last = pRanges[i].last };
@@ -340,7 +348,7 @@ namespace ascg::detail {
 
 				/* add the range to the list of edges */
 				pLayerGraph.edges.push_back(detail::Edge{ .headFirst = pRanges[i].headFirst, .headLast = pRanges[i].headLast });
-				edges.push_back(BuildEdge{ .first = strand.first, .last = strand.last });
+				pEdges.push_back(BuildEdge{ .first = strand.first, .last = strand.last });
 
 				/* update the node list */
 				nodes[strand.first] = 0;
@@ -354,8 +362,8 @@ namespace ascg::detail {
 			}
 
 			/* iterate over the edges again and patch them up to point to the layer index and register self-loops */
-			for (size_t i = 0; i < edges.size(); ++i) {
-				BuildEdge& edge = edges[i];
+			for (size_t i = 0; i < pEdges.size(); ++i) {
+				BuildEdge& edge = pEdges[i];
 				edge.first = nodes[edge.first];
 				edge.last = nodes[edge.last];
 				if (edge.first == edge.last)
@@ -364,18 +372,18 @@ namespace ascg::detail {
 
 			/* collect the overlap between the edges (used to select the side each edge will
 			*	be inserted on) and the list of all relevant edges, which cross one layer */
-			std::vector<std::vector<size_t>> overlap(edges.size());
+			std::vector<std::vector<size_t>> overlap(pEdges.size());
 			std::vector<size_t> relevant;
-			for (size_t i = 0; i < edges.size(); ++i) {
+			for (size_t i = 0; i < pEdges.size(); ++i) {
 				/* ensure that the edge at least spans one layer */
-				size_t f0 = edges[i].first, l0 = edges[i].last;
+				size_t f0 = pEdges[i].first, l0 = pEdges[i].last;
 				if (l0 - f0 <= 1)
 					continue;
 				relevant.push_back(i);
 
 				/* find all other edges, which may overlap */
-				for (size_t j = i + 1; j < edges.size(); ++j) {
-					size_t f1 = edges[j].first, l1 = edges[j].last;
+				for (size_t j = i + 1; j < pEdges.size(); ++j) {
+					size_t f1 = pEdges[j].first, l1 = pEdges[j].last;
 					if (l1 - f1 <= 1)
 						continue;
 
@@ -390,8 +398,8 @@ namespace ascg::detail {
 			/* assign each relevant edge a side (greedy assignment) where it encounters the fewest overlapping
 			*	conflicts (longest first as they affect others most; ties and conflict-free strands go to the
 			*	right; stable_sort for consistent graph results independent on sorting algorithm) */
-			std::vector<int8_t> side(edges.size(), 0);
-			std::stable_sort(relevant.begin(), relevant.end(), [&edges](size_t a, size_t b) {
+			std::vector<int8_t> side(pEdges.size(), 0);
+			std::stable_sort(relevant.begin(), relevant.end(), [&edges = pEdges](size_t a, size_t b) {
 				return (edges[a].last - edges[a].first) > (edges[b].last - edges[b].first);
 			});
 			const auto getConflicts = [&overlap, &side](size_t edge) -> intptr_t {
@@ -415,7 +423,7 @@ namespace ascg::detail {
 
 			/* helper to determine which edge is further outwards (later
 			*	end is outwards, on equal ends, earlier start is outwards) */
-			const auto sortByOuter = [&edges](size_t test, size_t other) -> bool {
+			const auto sortByOuter = [&edges = pEdges](size_t test, size_t other) -> bool {
 				if (edges[test].last != edges[other].last)
 					return (edges[test].last > edges[other].last);
 				return (edges[test].first < edges[other].first);
@@ -428,12 +436,12 @@ namespace ascg::detail {
 				left.clear(), right.clear(), endpoint.clear();
 
 				/* collect all of the edges, which start/end at the layer or pass it on either side */
-				for (size_t j = 0; j < edges.size(); ++j) {
+				for (size_t j = 0; j < pEdges.size(); ++j) {
 					if (j == pLayerGraph.layers[i].selfEdge)
 						continue;
-					if (edges[j].first == i || edges[j].last == i)
+					if (pEdges[j].first == i || pEdges[j].last == i)
 						endpoint.push_back(j);
-					else if (edges[j].first < i && i < edges[j].last)
+					else if (pEdges[j].first < i && i < pEdges[j].last)
 						(side[j] < 0 ? left : right).push_back(j);
 				}
 
@@ -448,7 +456,7 @@ namespace ascg::detail {
 					layer.points.push_back(detail::Point{ .body = detail::Traverse{.edge = edge} });
 				detail::Node& node = layer.points.emplace_back(detail::Point{ .body = detail::Node{} }).node();
 				for (size_t edge : endpoint)
-					(edges[edge].first == i ? node.start : node.end).push(detail::Endpoint{ .edge = edge });
+					(pEdges[edge].first == i ? node.start : node.end).push(detail::Endpoint{ .edge = edge });
 				for (size_t edge : right)
 					layer.points.push_back(detail::Point{ .body = detail::Traverse{.edge = edge} });
 			}
@@ -526,7 +534,7 @@ namespace ascg::detail {
 				return false;
 
 			/* construct the new layer based on the new indices */
-			std::vector<detail::Point> oldPoints{ layer.points.size(), detail::Point{} };
+			detail::Points oldPoints{ layer.points.size(), detail::Point{} };
 			std::swap(oldPoints, layer.points);
 			for (size_t i = 0; i < preferred.size(); ++i) {
 				if (preferred[i].index != i)
@@ -573,6 +581,255 @@ namespace ascg::detail {
 					std::swap(layer.points[j], layer.points[next]);
 					j = next;
 				}
+			}
+			return changed;
+		}
+
+	private:
+		void fSetupPaths(size_t edge, std::vector<StrandPath>& paths, size_t& actual) const {
+			const BuildEdge& buildEdge = pEdges[edge];
+			const detail::Points& prev = pLayerGraph.layers[buildEdge.first].points;
+			const detail::Points& next = pLayerGraph.layers[buildEdge.first + 1].points;
+
+			/* helper to compute the absolute and normalized drift and to determine if a
+			*	point is the current edge and to update the crossings count for a moved point */
+			const auto getDrift = [&prev, &next](size_t iStart, size_t iNext) -> float {
+				float dPrev = (static_cast<float>(iStart) + 0.5f) / prev.size();
+				float dNext = static_cast<float>(iNext) / next.size();
+				return (dPrev < dNext ? (dNext - dPrev) : (dPrev - dNext));
+			};
+			const auto isCurrent = [edge](const detail::Point& point) -> bool {
+				return (point.isTraverse() != nullptr && point.traverse().edge == edge);
+			};
+			const auto getMoved = [](size_t self, size_t other, size_t crossings) -> size_t {
+				if (other == self)
+					return crossings;
+				return (other < self ? crossings - 1 : crossings + 1);
+			};
+
+			/* count the initial crossings from the left start to the edge-node */
+			size_t crossings = 0, start = 0;
+			while (prev[start].isTraverse() != nullptr)
+				++crossings, ++start;
+
+			/* initialize the list of paths */
+			paths.resize(next.size() + 1);
+			for (size_t i = 0;; ++i) {
+				paths[i].crossings = crossings;
+				paths[i].drift = getDrift(start, i);
+				paths[i].steps.push_back(i);
+
+				/* check if the end has been reached and otherwise update the actual current crossings */
+				if (i >= next.size())
+					break;
+				if (isCurrent(next[i]))
+					actual += crossings;
+
+				/* update the crossing count to consider the right point skipped */
+				if (const detail::Node* node = next[i].isNode(); node != nullptr) for (const detail::Endpoint& ep : node->end)
+					crossings = getMoved(start, ep.other, crossings);
+				else if (next[i].traverse().edge != edge)
+					crossings = getMoved(start, next[i].traverse().prev, crossings);
+			}
+		}
+		void fAdvancePaths(size_t index, size_t edge, const std::vector<StrandPath>& current, std::vector<StrandPath>& paths, size_t& actual) const {
+			const detail::Points& prev = pLayerGraph.layers[index].points;
+			const detail::Points& next = pLayerGraph.layers[index + 1].points;
+
+			/* helper to compute the absolute and normalized drift and to determine if a point is the current edge */
+			const auto getDrift = [&prev, &next](size_t iPrev, size_t iNext) -> float {
+				float dPrev = static_cast<float>(iPrev) / prev.size();
+				float dNext = static_cast<float>(iNext) / next.size();
+				return (dPrev < dNext ? (dNext - dPrev) : (dPrev - dNext));
+			};
+			const auto isCurrent = [edge](const detail::Point& point) -> bool {
+				return (point.isTraverse() != nullptr && point.traverse().edge == edge);
+			};
+
+			/* initialize the crossings map, which maps prev-position to crossings
+			*	between it and the current position, which starts at zero */
+			std::vector<size_t> crossings(prev.size() + 1, 0);
+			for (size_t i = 0; i < prev.size(); ++i) {
+				if (const detail::Node* node = prev[i].isNode(); node != nullptr)
+					crossings[i + 1] = crossings[i] + node->start.size();
+				else
+					crossings[i + 1] = crossings[i] + (isCurrent(prev[i]) ? 0 : 1);
+			}
+
+			/* iterate over the potential new endpoint paths and find
+			*	the cheapest step from the current paths to the position */
+			if (paths.size() <= next.size())
+				paths.resize(next.size() + 1);
+			for (size_t i = 0;; ++i) {
+				StrandPath& path = paths[i];
+
+				/* select the cheapest of the current paths with the lowest drift to reach the current point */
+				size_t best = 0, bestCrossings = 0;
+				float bestDrift = 0;
+				for (size_t j = 0; j <= prev.size(); ++j) {
+					size_t curCrossings = current[j].crossings + crossings[j];
+					float curDrift = current[j].drift + getDrift(j, i);
+					if (j == 0 || curCrossings < bestCrossings || (bestCrossings == curCrossings && curDrift < bestDrift))
+						best = j, bestCrossings = curCrossings, bestDrift = curDrift;
+				}
+
+				/* setup the new best path */
+				path.crossings = bestCrossings;
+				path.drift = bestDrift;
+				(path.steps = current[best].steps).push_back(i);
+
+				/* check if the end has been reached and otherwise update the actual current crossings */
+				if (i >= next.size())
+					break;
+				if (isCurrent(next[i]))
+					actual += crossings[next[i].traverse().prev];
+
+				/* iterate other the crossings and update them based on the moved point being pushed around */
+				if (const detail::Node* node = next[i].isNode(); node != nullptr) {
+					for (size_t j = 0; j < crossings.size(); ++j) {
+						for (const detail::Endpoint& ep : node->end)
+							crossings[j] = (ep.other < j ? crossings[j] - 1 : crossings[j] + 1);
+					}
+				}
+				else if (next[i].traverse().edge != edge) {
+					size_t where = next[i].traverse().prev;
+					for (size_t j = 0; j < crossings.size(); ++j)
+						crossings[j] = (where < j ? crossings[j] - 1 : crossings[j] + 1);
+				}
+			}
+		}
+		size_t fFinalizePaths(size_t edge, std::vector<StrandPath>& paths, size_t& actual) const {
+			const BuildEdge& buildEdge = pEdges[edge];
+			const detail::Points& prev = pLayerGraph.layers[buildEdge.last - 1].points;
+			const detail::Points& next = pLayerGraph.layers[buildEdge.last].points;
+
+			/* helper to compute the absolute and normalized drift and to determine if a
+			*	point is the current edge and to update the crossings count for a moved point */
+			const auto getDrift = [&prev, &next](size_t iPrev, size_t iEnd) -> float {
+				float dPrev = static_cast<float>(iPrev) / prev.size();
+				float dNext = (static_cast<float>(iEnd) + 0.5f) / next.size();
+				return (dPrev < dNext ? (dNext - dPrev) : (dPrev - dNext));
+			};
+			const auto isCurrent = [edge](const detail::Point& point) -> bool {
+				return (point.isTraverse() != nullptr && point.traverse().edge == edge);
+			};
+			const auto getMoved = [](size_t self, size_t other, size_t crossings) -> size_t {
+				if (other == self)
+					return crossings;
+				return (other < self ? crossings - 1 : crossings + 1);
+			};
+
+			/* count the initial crossings from the left start to the edge-node */
+			size_t crossings = 0, end = 0;
+			while (next[end].isTraverse() != nullptr)
+				++crossings, ++end;
+
+			/* update each of the paths towards the target position and check if the best path has been found */
+			size_t best = 0;
+			for (size_t i = 0;; ++i) {
+				StrandPath& path = paths[i];
+				path.crossings += crossings;
+				path.drift += getDrift(i, end);
+
+				/* check if the path is better than the last best (for same crossings, select the path with the lowest normalized drift) */
+				StrandPath& pathBest = paths[best];
+				if (i == 0 || path.crossings < pathBest.crossings || (path.crossings == pathBest.crossings && path.drift < pathBest.drift))
+					best = i;
+
+				/* check if the end has been reached and otherwise update the actual current crossings */
+				if (i >= prev.size())
+					break;
+				if (isCurrent(prev[i]))
+					actual += crossings;
+
+				/* update the crossing count to consider the right point skipped */
+				if (const detail::Node* node = prev[i].isNode(); node != nullptr) for (const detail::Endpoint& ep : node->start)
+					crossings = getMoved(end, ep.other, crossings);
+				else if (prev[i].traverse().edge != edge)
+					crossings = getMoved(end, prev[i].traverse().next, crossings);
+			}
+			return best;
+		}
+		bool fShiftStrand(size_t index) {
+			/* check if the edge is too small and can be ignored */
+			BuildEdge& edge = pEdges[index];
+			if (edge.last - edge.first <= 1)
+				return false;
+
+			/* create the set of potential paths from the first to the last node and track their crossing counts
+			*	as well as the current crossings (dynamic programming approach to finding cheapest paths) */
+			std::vector<StrandPath> paths, last;
+			size_t crossings = 0;
+			fSetupPaths(index, paths, crossings);
+			for (size_t i = edge.first + 1; i < edge.last - 1; ++i) {
+				std::swap(paths, last);
+				fAdvancePaths(i, index, last, paths, crossings);
+			}
+
+			/* check if a best path has been found, which is better than the current path
+			*	(will then make the layers strictly better, thereby being a monotonic algorithm) */
+			const StrandPath& best = paths[fFinalizePaths(index, paths, crossings)];
+			if (best.crossings >= crossings)
+				return false;
+
+			/* move the points into position (only the traversals, as the nodes will stay intact) */
+			for (size_t i = edge.first + 1; i < edge.last; ++i) {
+				detail::Points& points = pLayerGraph.layers[i].points;
+
+				/* find the index of the current point */
+				size_t where = 0;
+				while (points[where].isTraverse() == nullptr || points[where].traverse().edge != index)
+					++where;
+
+				/* extract the target position the point actually needs to be moved to */
+				size_t target = best.steps[i - edge.first - 1];
+				if (target > where)
+					--target;
+
+				/* move the point to the new position */
+				while (where != target) {
+					size_t next = detail::Towards(where, target);
+					fMovePoint(points[where], next, i);
+					fMovePoint(points[next], where, i);
+					std::swap(points[where], points[next]);
+					where = next;
+				}
+			}
+			return true;
+		}
+		bool fShiftStrands() {
+			bool changed = false;
+
+			/* setup the current stamps and reset the edge-stamps */
+			size_t stamp = 1;
+			std::vector<size_t> layers(pLayerGraph.layers.size(), 1);
+			for (BuildEdge& edge : pEdges)
+				edge.stamp = 0;
+
+			/* iterate over the strands and try to move all strands into better positions (will
+			*	only be moved, if they are strictly better, hence the algorithm is monotonic) */
+			for (bool dirty = true; dirty;) {
+				dirty = false;
+				for (size_t i = 0; i < pEdges.size(); ++i) {
+					BuildEdge& edge = pEdges[i];
+
+					/* check if the edge is outdated and needs to be re-checked */
+					auto relevant = (layers | std::views::drop(edge.first) | std::views::take(edge.last - edge.first + 1));
+					if (std::ranges::all_of(relevant, [is = edge.stamp](auto v) { return v <= is; }))
+						continue;
+					edge.stamp = stamp;
+
+					/* try to shift the strand into a new position */
+					if (!fShiftStrand(i))
+						continue;
+
+					/* mark the affected layers and edge as being updated */
+					edge.stamp = ++stamp;
+					for (size_t& layer : relevant)
+						layer = stamp;
+					dirty = true;
+				}
+				changed = (changed || dirty);
 			}
 			return changed;
 		}
