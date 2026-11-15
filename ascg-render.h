@@ -93,8 +93,8 @@ namespace ascg::detail {
 				graph.rows.push_back(fDrawRow(pGrid[i], theme));
 
 				/* check if this row contained a node and update the map accordingly */
-				if (std::ranges::any_of(pGrid[i], [](auto val) -> bool { return val.kind == detail::CellKind::node; }))
-					graph.map.push_back({ pLayers.layers[node++].index, i });
+				if (std::ranges::find(pGrid[i], detail::CellKind::node, &detail::Cell::kind) != pGrid[i].end())
+					graph.map.push_back({ .row = i, .node = pLayers.layers[node++].index });
 			}
 			return graph;
 		}

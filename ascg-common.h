@@ -86,6 +86,12 @@ namespace ascg {
 	template <class Type>
 	concept IterationStop = std::predicate<Type>;
 
+	/* map entry for graph map from row to node */
+	struct MapEntry {
+		size_t row = 0;
+		size_t node = 0;
+	};
+
 	/*
 	*	Describes a layered graph made up of the character set defined by the theme.
 	*	Edges can be directed or undirected but at most one edge per any two nodes.
@@ -97,7 +103,7 @@ namespace ascg {
 		std::vector<std::string> rows;
 
 		/* list of mappings from node index to row (sorted) */
-		std::vector<std::pair<size_t, size_t>> map;
+		std::vector<ascg::MapEntry> map;
 	};
 
 	/* character theme to be used for the rendering */

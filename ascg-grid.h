@@ -1787,7 +1787,7 @@ namespace ascg::detail {
 
 			/* check if the previous or upcoming row also contains nodes (due to nodes with few
 			*	or no transitions being moved), in which case padding rows need to be inserted */
-			if (yEmpty + 1 < pGrid.size() && std::ranges::find(pGrid[yEmpty], detail::CellKind::node, &detail::Cell::kind) != pGrid[yEmpty].end())
+			if (yEmpty + 1 < pGrid.size() && std::ranges::find(pGrid[yEmpty + 1], detail::CellKind::node, &detail::Cell::kind) != pGrid[yEmpty + 1].end())
 				fInsertNullRow(yEmpty + 1);
 			if (yEmpty > 0 && std::ranges::find(pGrid[yEmpty - 1], detail::CellKind::node, &detail::Cell::kind) != pGrid[yEmpty - 1].end())
 				fInsertNullRow(yEmpty);
