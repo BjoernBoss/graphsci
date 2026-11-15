@@ -173,10 +173,12 @@ namespace ascg::detail {
 	/* Order the points of every layer to minimize the crossings between neighboring layers:
 	*	1.	construct the initial layers by sorting the edges onto either side of the
 	*		node (while trying to reduce potential crossings between overlapping edges)
-	*	2.	repeat: barycenter sweep down and up the layers, then shift every point to its crossing-minimal
-	*		position, until the order settles or repeats itself, while keeping the best order seen (given that
-	*		barycenter is not monotonic, the states are recorded to detect cycles and abort ocilating movements)
-	*	3.	run step 2 with the two-sided and the one-sided barycenter and keep the order with fewer crossings
+	*	2.	barycenter sweep down and up the layers, then shift every point to its crossing-minimal position,
+	*		until the order settles or repeats itself, while keeping the best order seen (given that barycenter
+	*		is not monotonic, the states are recorded to detect cycles and abort ocilating movements)
+	*	3.	use dynamic programming to optimally place all strands better along the current alignment and if
+	*		this changes the layers, repeat from step 2
+	*	4.	run steps 2-3 with the two-sided and the one-sided barycenter and keep the order with fewer crossings
 	*		(two-sided tends to win on dense graphs, one-sided on sparse graphs, ties keep two-sided) */
 	class LayerBuilder {
 	private:
@@ -329,6 +331,172 @@ namespace ascg::detail {
 				hasher.add(std::numeric_limits<size_t>::max());
 			}
 			return { hasher.digest(), crossings };
+		}
+
+	private:
+		void fSetupPaths(size_t edge, std::vector<StrandPath>& paths, size_t& actual) const {
+			const BuildEdge& buildEdge = pEdges[edge];
+			const detail::Points& prev = pLayerGraph.layers[buildEdge.first].points;
+			const detail::Points& next = pLayerGraph.layers[buildEdge.first + 1].points;
+
+			/* helper to compute the absolute and normalized drift and to determine if a
+			*	point is the current edge and to update the crossings count for a moved point */
+			const auto getDrift = [&prev, &next](size_t iStart, size_t iNext) -> float {
+				float dPrev = (static_cast<float>(iStart) + 0.5f) / prev.size();
+				float dNext = static_cast<float>(iNext) / next.size();
+				return (dPrev < dNext ? (dNext - dPrev) : (dPrev - dNext));
+			};
+			const auto isCurrent = [edge](const detail::Point& point) -> bool {
+				return (point.isTraverse() != nullptr && point.traverse().edge == edge);
+			};
+			const auto getMoved = [](size_t self, size_t other, size_t crossings) -> size_t {
+				if (other == self)
+					return crossings;
+				return (other < self ? crossings - 1 : crossings + 1);
+			};
+
+			/* count the initial crossings from the left start to the edge-node */
+			size_t crossings = 0, start = 0;
+			while (prev[start].isTraverse() != nullptr)
+				++crossings, ++start;
+
+			/* initialize the list of paths */
+			paths.resize(next.size() + 1);
+			for (size_t i = 0;; ++i) {
+				paths[i].crossings = crossings;
+				paths[i].drift = getDrift(start, i);
+				paths[i].steps.push_back(i);
+
+				/* check if the end has been reached and otherwise update the actual current crossings */
+				if (i >= next.size())
+					break;
+				if (isCurrent(next[i]))
+					actual += crossings;
+
+				/* update the crossing count to consider the right point skipped */
+				if (const detail::Node* node = next[i].isNode(); node != nullptr) for (const detail::Endpoint& ep : node->end)
+					crossings = getMoved(start, ep.other, crossings);
+				else if (next[i].traverse().edge != edge)
+					crossings = getMoved(start, next[i].traverse().prev, crossings);
+			}
+		}
+		void fAdvancePaths(size_t index, size_t edge, const std::vector<StrandPath>& current, std::vector<StrandPath>& paths, size_t& actual) const {
+			const detail::Points& prev = pLayerGraph.layers[index].points;
+			const detail::Points& next = pLayerGraph.layers[index + 1].points;
+
+			/* helper to compute the absolute and normalized drift and to determine if a point is the current edge */
+			const auto getDrift = [&prev, &next](size_t iPrev, size_t iNext) -> float {
+				float dPrev = static_cast<float>(iPrev) / prev.size();
+				float dNext = static_cast<float>(iNext) / next.size();
+				return (dPrev < dNext ? (dNext - dPrev) : (dPrev - dNext));
+			};
+			const auto isCurrent = [edge](const detail::Point& point) -> bool {
+				return (point.isTraverse() != nullptr && point.traverse().edge == edge);
+			};
+
+			/* initialize the crossings map, which maps prev-position to crossings
+			*	between it and the current position, which starts at zero */
+			std::vector<size_t> crossings(prev.size() + 1, 0);
+			for (size_t i = 0; i < prev.size(); ++i) {
+				if (const detail::Node* node = prev[i].isNode(); node != nullptr)
+					crossings[i + 1] = crossings[i] + node->start.size();
+				else
+					crossings[i + 1] = crossings[i] + (isCurrent(prev[i]) ? 0 : 1);
+			}
+
+			/* iterate over the potential new endpoint paths and find
+			*	the cheapest step from the current paths to the position */
+			if (paths.size() <= next.size())
+				paths.resize(next.size() + 1);
+			for (size_t i = 0;; ++i) {
+				StrandPath& path = paths[i];
+
+				/* select the cheapest of the current paths with the lowest drift to reach the current point */
+				size_t best = 0, bestCrossings = 0;
+				float bestDrift = 0;
+				for (size_t j = 0; j <= prev.size(); ++j) {
+					size_t curCrossings = current[j].crossings + crossings[j];
+					float curDrift = current[j].drift + getDrift(j, i);
+					if (j == 0 || curCrossings < bestCrossings || (bestCrossings == curCrossings && curDrift < bestDrift))
+						best = j, bestCrossings = curCrossings, bestDrift = curDrift;
+				}
+
+				/* setup the new best path */
+				path.crossings = bestCrossings;
+				path.drift = bestDrift;
+				(path.steps = current[best].steps).push_back(i);
+
+				/* check if the end has been reached and otherwise update the actual current crossings */
+				if (i >= next.size())
+					break;
+				if (isCurrent(next[i]))
+					actual += crossings[next[i].traverse().prev];
+
+				/* iterate other the crossings and update them based on the moved point being pushed around */
+				if (const detail::Node* node = next[i].isNode(); node != nullptr) {
+					for (size_t j = 0; j < crossings.size(); ++j) {
+						for (const detail::Endpoint& ep : node->end)
+							crossings[j] = (ep.other < j ? crossings[j] - 1 : crossings[j] + 1);
+					}
+				}
+				else if (next[i].traverse().edge != edge) {
+					size_t where = next[i].traverse().prev;
+					for (size_t j = 0; j < crossings.size(); ++j)
+						crossings[j] = (where < j ? crossings[j] - 1 : crossings[j] + 1);
+				}
+			}
+		}
+		size_t fFinalizePaths(size_t edge, std::vector<StrandPath>& paths, size_t& actual) const {
+			const BuildEdge& buildEdge = pEdges[edge];
+			const detail::Points& prev = pLayerGraph.layers[buildEdge.last - 1].points;
+			const detail::Points& next = pLayerGraph.layers[buildEdge.last].points;
+
+			/* helper to compute the absolute and normalized drift and to determine if a
+			*	point is the current edge and to update the crossings count for a moved point */
+			const auto getDrift = [&prev, &next](size_t iPrev, size_t iEnd) -> float {
+				float dPrev = static_cast<float>(iPrev) / prev.size();
+				float dNext = (static_cast<float>(iEnd) + 0.5f) / next.size();
+				return (dPrev < dNext ? (dNext - dPrev) : (dPrev - dNext));
+			};
+			const auto isCurrent = [edge](const detail::Point& point) -> bool {
+				return (point.isTraverse() != nullptr && point.traverse().edge == edge);
+			};
+			const auto getMoved = [](size_t self, size_t other, size_t crossings) -> size_t {
+				if (other == self)
+					return crossings;
+				return (other < self ? crossings - 1 : crossings + 1);
+			};
+
+			/* count the initial crossings from the left start to the edge-node */
+			size_t crossings = 0, end = 0;
+			while (next[end].isTraverse() != nullptr)
+				++crossings, ++end;
+
+			/* update each of the paths towards the target position and check if the best path has been found */
+			size_t best = 0;
+			for (size_t i = 0;; ++i) {
+				StrandPath& path = paths[i];
+				path.crossings += crossings;
+				path.drift += getDrift(i, end);
+
+				/* check if the path is better than the last best (for same crossings, select the path with the lowest normalized drift) */
+				StrandPath& pathBest = paths[best];
+				if (i == 0 || path.crossings < pathBest.crossings || (path.crossings == pathBest.crossings && path.drift < pathBest.drift))
+					best = i;
+
+				/* check if the end has been reached and otherwise update the actual current crossings */
+				if (i >= prev.size())
+					break;
+				if (isCurrent(prev[i]))
+					actual += crossings;
+
+				/* update the crossing count to consider the right point skipped */
+				if (const detail::Node* node = prev[i].isNode(); node != nullptr) for (const detail::Endpoint& ep : node->start)
+					crossings = getMoved(end, ep.other, crossings);
+				else if (prev[i].traverse().edge != edge)
+					crossings = getMoved(end, prev[i].traverse().next, crossings);
+			}
+			return best;
 		}
 
 	private:
@@ -584,172 +752,6 @@ namespace ascg::detail {
 			}
 			return changed;
 		}
-
-	private:
-		void fSetupPaths(size_t edge, std::vector<StrandPath>& paths, size_t& actual) const {
-			const BuildEdge& buildEdge = pEdges[edge];
-			const detail::Points& prev = pLayerGraph.layers[buildEdge.first].points;
-			const detail::Points& next = pLayerGraph.layers[buildEdge.first + 1].points;
-
-			/* helper to compute the absolute and normalized drift and to determine if a
-			*	point is the current edge and to update the crossings count for a moved point */
-			const auto getDrift = [&prev, &next](size_t iStart, size_t iNext) -> float {
-				float dPrev = (static_cast<float>(iStart) + 0.5f) / prev.size();
-				float dNext = static_cast<float>(iNext) / next.size();
-				return (dPrev < dNext ? (dNext - dPrev) : (dPrev - dNext));
-			};
-			const auto isCurrent = [edge](const detail::Point& point) -> bool {
-				return (point.isTraverse() != nullptr && point.traverse().edge == edge);
-			};
-			const auto getMoved = [](size_t self, size_t other, size_t crossings) -> size_t {
-				if (other == self)
-					return crossings;
-				return (other < self ? crossings - 1 : crossings + 1);
-			};
-
-			/* count the initial crossings from the left start to the edge-node */
-			size_t crossings = 0, start = 0;
-			while (prev[start].isTraverse() != nullptr)
-				++crossings, ++start;
-
-			/* initialize the list of paths */
-			paths.resize(next.size() + 1);
-			for (size_t i = 0;; ++i) {
-				paths[i].crossings = crossings;
-				paths[i].drift = getDrift(start, i);
-				paths[i].steps.push_back(i);
-
-				/* check if the end has been reached and otherwise update the actual current crossings */
-				if (i >= next.size())
-					break;
-				if (isCurrent(next[i]))
-					actual += crossings;
-
-				/* update the crossing count to consider the right point skipped */
-				if (const detail::Node* node = next[i].isNode(); node != nullptr) for (const detail::Endpoint& ep : node->end)
-					crossings = getMoved(start, ep.other, crossings);
-				else if (next[i].traverse().edge != edge)
-					crossings = getMoved(start, next[i].traverse().prev, crossings);
-			}
-		}
-		void fAdvancePaths(size_t index, size_t edge, const std::vector<StrandPath>& current, std::vector<StrandPath>& paths, size_t& actual) const {
-			const detail::Points& prev = pLayerGraph.layers[index].points;
-			const detail::Points& next = pLayerGraph.layers[index + 1].points;
-
-			/* helper to compute the absolute and normalized drift and to determine if a point is the current edge */
-			const auto getDrift = [&prev, &next](size_t iPrev, size_t iNext) -> float {
-				float dPrev = static_cast<float>(iPrev) / prev.size();
-				float dNext = static_cast<float>(iNext) / next.size();
-				return (dPrev < dNext ? (dNext - dPrev) : (dPrev - dNext));
-			};
-			const auto isCurrent = [edge](const detail::Point& point) -> bool {
-				return (point.isTraverse() != nullptr && point.traverse().edge == edge);
-			};
-
-			/* initialize the crossings map, which maps prev-position to crossings
-			*	between it and the current position, which starts at zero */
-			std::vector<size_t> crossings(prev.size() + 1, 0);
-			for (size_t i = 0; i < prev.size(); ++i) {
-				if (const detail::Node* node = prev[i].isNode(); node != nullptr)
-					crossings[i + 1] = crossings[i] + node->start.size();
-				else
-					crossings[i + 1] = crossings[i] + (isCurrent(prev[i]) ? 0 : 1);
-			}
-
-			/* iterate over the potential new endpoint paths and find
-			*	the cheapest step from the current paths to the position */
-			if (paths.size() <= next.size())
-				paths.resize(next.size() + 1);
-			for (size_t i = 0;; ++i) {
-				StrandPath& path = paths[i];
-
-				/* select the cheapest of the current paths with the lowest drift to reach the current point */
-				size_t best = 0, bestCrossings = 0;
-				float bestDrift = 0;
-				for (size_t j = 0; j <= prev.size(); ++j) {
-					size_t curCrossings = current[j].crossings + crossings[j];
-					float curDrift = current[j].drift + getDrift(j, i);
-					if (j == 0 || curCrossings < bestCrossings || (bestCrossings == curCrossings && curDrift < bestDrift))
-						best = j, bestCrossings = curCrossings, bestDrift = curDrift;
-				}
-
-				/* setup the new best path */
-				path.crossings = bestCrossings;
-				path.drift = bestDrift;
-				(path.steps = current[best].steps).push_back(i);
-
-				/* check if the end has been reached and otherwise update the actual current crossings */
-				if (i >= next.size())
-					break;
-				if (isCurrent(next[i]))
-					actual += crossings[next[i].traverse().prev];
-
-				/* iterate other the crossings and update them based on the moved point being pushed around */
-				if (const detail::Node* node = next[i].isNode(); node != nullptr) {
-					for (size_t j = 0; j < crossings.size(); ++j) {
-						for (const detail::Endpoint& ep : node->end)
-							crossings[j] = (ep.other < j ? crossings[j] - 1 : crossings[j] + 1);
-					}
-				}
-				else if (next[i].traverse().edge != edge) {
-					size_t where = next[i].traverse().prev;
-					for (size_t j = 0; j < crossings.size(); ++j)
-						crossings[j] = (where < j ? crossings[j] - 1 : crossings[j] + 1);
-				}
-			}
-		}
-		size_t fFinalizePaths(size_t edge, std::vector<StrandPath>& paths, size_t& actual) const {
-			const BuildEdge& buildEdge = pEdges[edge];
-			const detail::Points& prev = pLayerGraph.layers[buildEdge.last - 1].points;
-			const detail::Points& next = pLayerGraph.layers[buildEdge.last].points;
-
-			/* helper to compute the absolute and normalized drift and to determine if a
-			*	point is the current edge and to update the crossings count for a moved point */
-			const auto getDrift = [&prev, &next](size_t iPrev, size_t iEnd) -> float {
-				float dPrev = static_cast<float>(iPrev) / prev.size();
-				float dNext = (static_cast<float>(iEnd) + 0.5f) / next.size();
-				return (dPrev < dNext ? (dNext - dPrev) : (dPrev - dNext));
-			};
-			const auto isCurrent = [edge](const detail::Point& point) -> bool {
-				return (point.isTraverse() != nullptr && point.traverse().edge == edge);
-			};
-			const auto getMoved = [](size_t self, size_t other, size_t crossings) -> size_t {
-				if (other == self)
-					return crossings;
-				return (other < self ? crossings - 1 : crossings + 1);
-			};
-
-			/* count the initial crossings from the left start to the edge-node */
-			size_t crossings = 0, end = 0;
-			while (next[end].isTraverse() != nullptr)
-				++crossings, ++end;
-
-			/* update each of the paths towards the target position and check if the best path has been found */
-			size_t best = 0;
-			for (size_t i = 0;; ++i) {
-				StrandPath& path = paths[i];
-				path.crossings += crossings;
-				path.drift += getDrift(i, end);
-
-				/* check if the path is better than the last best (for same crossings, select the path with the lowest normalized drift) */
-				StrandPath& pathBest = paths[best];
-				if (i == 0 || path.crossings < pathBest.crossings || (path.crossings == pathBest.crossings && path.drift < pathBest.drift))
-					best = i;
-
-				/* check if the end has been reached and otherwise update the actual current crossings */
-				if (i >= prev.size())
-					break;
-				if (isCurrent(prev[i]))
-					actual += crossings;
-
-				/* update the crossing count to consider the right point skipped */
-				if (const detail::Node* node = prev[i].isNode(); node != nullptr) for (const detail::Endpoint& ep : node->start)
-					crossings = getMoved(end, ep.other, crossings);
-				else if (prev[i].traverse().edge != edge)
-					crossings = getMoved(end, prev[i].traverse().next, crossings);
-			}
-			return best;
-		}
 		bool fShiftStrand(size_t index) {
 			/* check if the edge is too small and can be ignored */
 			BuildEdge& edge = pEdges[index];
@@ -797,6 +799,32 @@ namespace ascg::detail {
 			}
 			return true;
 		}
+
+	private:
+		bool fReorderLayers(bool bidirectional) {
+			bool changed = false;
+
+			/* perform a full sweep by moving down the layers first and then back up (always adjust against
+			*	either the neighbors in both directions or the direction-based previous neighbors) */
+			for (size_t i = 1; i < pLayerGraph.layers.size(); ++i)
+				changed = (fReorderLayer(i, (bidirectional ? Direction::bidirectional : Direction::backwards)) || changed);
+			for (size_t i = pLayerGraph.layers.size() - 1; i > 0; --i)
+				changed = (fReorderLayer(i - 1, (bidirectional ? Direction::bidirectional : Direction::forwards)) || changed);
+			return changed;
+		}
+		bool fShiftLayers() {
+			bool changed = false;
+
+			/* try to reduce the crossings by shifting the nodes within the
+			*	layers to reduce crossings to the immediate neighbor layers */
+			for (bool dirty = true; dirty;) {
+				dirty = false;
+				for (size_t i = 0; i < pLayerGraph.layers.size(); ++i)
+					dirty = (fShiftLayer(i) || dirty);
+				changed = (changed || dirty);
+			}
+			return changed;
+		}
 		bool fShiftStrands() {
 			bool changed = false;
 
@@ -833,58 +861,39 @@ namespace ascg::detail {
 			}
 			return changed;
 		}
-
-	private:
-		bool fReorderLayers(bool bidirectional) {
-			bool changed = false;
-
-			/* perform a full sweep by moving down the layers first and then back up (always adjust against
-			*	either the neighbors in both directions or the direction-based previous neighbors) */
-			for (size_t i = 1; i < pLayerGraph.layers.size(); ++i)
-				changed = (fReorderLayer(i, (bidirectional ? Direction::bidirectional : Direction::backwards)) || changed);
-			for (size_t i = pLayerGraph.layers.size() - 1; i > 0; --i)
-				changed = (fReorderLayer(i - 1, (bidirectional ? Direction::bidirectional : Direction::forwards)) || changed);
-			return changed;
-		}
-		bool fShiftLayers() {
-			bool changed = false;
-
-			/* try to reduce the crossings by shifting the nodes within the
-			*	layers to reduce crossings to the immediate neighbor layers */
-			for (bool dirty = true; dirty;) {
-				dirty = false;
-				for (size_t i = 0; i < pLayerGraph.layers.size(); ++i)
-					dirty = (fShiftLayer(i) || dirty);
-				changed = (changed || dirty);
-			}
-			return changed;
-		}
 		size_t fOptimizeLayers(bool bidirectional) {
-			std::vector<detail::Layer> bestLayers = pLayerGraph.layers;
-
-			/* measure the current layers to keep track of the best
-			*	version and to detect cycles (barycenter is not monotonic) */
-			auto [hash, bestCrossings] = fMeasureLayers();
-			std::unordered_set<size_t> seen{ hash };
-
-			/* alternate reordering and shifting until the order settles or repeats itself (based on already seen hashes
-			*	of the layer states; terminates as the iteration step is a deterministic change in a finite order) */
 			while (true) {
-				bool changed = fReorderLayers(bidirectional);
-				changed = (fShiftLayers() || changed);
+				std::vector<detail::Layer> bestLayers = pLayerGraph.layers;
 
-				/* check if the new state is the best state so far and update
-				*	the seen list to determine if the layers have settled */
-				auto [hash, crossings] = fMeasureLayers();
-				if (crossings < bestCrossings)
-					bestCrossings = crossings, bestLayers = pLayerGraph.layers;
-				if (!changed || !seen.insert(hash).second)
-					break;
+				/* measure the current layers to keep track of the best
+				*	version and to detect cycles (barycenter is not monotonic) */
+				auto [hash, bestCrossings] = fMeasureLayers();
+				std::unordered_set<size_t> seen{ hash };
+
+				/* alternate reordering and shifting until the order settles or repeats itself (based on already seen hashes
+				*	of the layer states; terminates as the iteration step is a deterministic change in a finite order) */
+				while (true) {
+					bool changed = fReorderLayers(bidirectional);
+					changed = (fShiftLayers() || changed);
+
+					/* check if the new state is the best state so far and update
+					*	the seen list to determine if the layers have settled */
+					auto [hash, crossings] = fMeasureLayers();
+					if (crossings < bestCrossings)
+						bestCrossings = crossings, bestLayers = pLayerGraph.layers;
+					if (!changed || !seen.insert(hash).second)
+						break;
+				}
+
+				/* restore the current best layer state (will always be just as good as the stored state) */
+				pLayerGraph.layers = std::move(bestLayers);
+
+				/* try to move the strands into position and restart the algorithm if a change occured (to potentially
+				*	reach a new optimal minimum), and otherwise, return the crossing count, as it will not have changed */
+				if (fShiftStrands())
+					continue;
+				return bestCrossings;
 			}
-
-			/* restore the current best layer state (will always be just as good as the stored state) */
-			pLayerGraph.layers = std::move(bestLayers);
-			return bestCrossings;
 		}
 
 	public:
