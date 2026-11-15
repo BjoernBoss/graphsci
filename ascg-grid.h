@@ -1699,24 +1699,25 @@ namespace ascg::detail {
 					continue;
 
 				/* count the number of of potentially benefitting connections in each direction */
-				intptr_t leftScore = 0, rightScore = 0, emptyScore = 0;
+				intptr_t leftScore = 0, rightScore = 0, emptyScore = 0, anyCount = 0;
 				for (size_t i = first; i <= last; ++i) {
 					if (int8_t shift = fCheckShiftPreference(i, y, true); shift == 0)
 						++emptyScore;
 					else
-						++(shift < 0 ? leftScore : rightScore);
+						++(shift < 0 ? leftScore : rightScore), ++anyCount;
 
 					if (int8_t shift = fCheckShiftPreference(i, y, false); shift == 0)
 						++emptyScore;
 					else
-						++(shift < 0 ? leftScore : rightScore);
+						++(shift < 0 ? leftScore : rightScore), ++anyCount;
 				}
 
 				/* insert the potential moves into the open set and update the scores
-				*	accordingly (grid does not benefit from preferring free neighbor slots) */
-				if (leftCheck && leftScore > 0)
+				*	accordingly (grid does not benefit from preferring free neighbor slots,
+				*	allow nodes without transitions to move in any direction) */
+				if (leftCheck && (leftScore > 0 || anyCount == 0))
 					open.insert({ leftPoint, leftScore - rightScore - emptyScore });
-				if (rightCheck && rightScore > 0)
+				if (rightCheck && (rightScore > 0 || anyCount == 0))
 					open.insert({ rightPoint, rightScore - leftScore - emptyScore });
 			}
 
@@ -1777,12 +1778,19 @@ namespace ascg::detail {
 				return false;
 
 			/* move the node over by ensuring that the spot next to it becomes empty and update the iterative state */
-			fCreateEmptyCell(bestEmptySlot, nodeMap[best->first.index], bestLeftwards);
+			size_t yEmpty = fCreateEmptyCell(bestEmptySlot, nodeMap[best->first.index], bestLeftwards).second;
 			closed.insert(best->first);
 			if (bestDistance == 1)
 				open.erase(best);
 			else
 				current = ShiftTarget{ .point = best->first, .distance = bestDistance };
+
+			/* check if the previous or upcoming row also contains nodes (due to nodes with few
+			*	or no transitions being moved), in which case padding rows need to be inserted */
+			if (yEmpty + 1 < pGrid.size() && std::ranges::find(pGrid[yEmpty], detail::CellKind::node, &detail::Cell::kind) != pGrid[yEmpty].end())
+				fInsertNullRow(yEmpty + 1);
+			if (yEmpty > 0 && std::ranges::find(pGrid[yEmpty - 1], detail::CellKind::node, &detail::Cell::kind) != pGrid[yEmpty - 1].end())
+				fInsertNullRow(yEmpty);
 			return true;
 		}
 
