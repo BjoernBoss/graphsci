@@ -562,8 +562,7 @@ namespace ascg::detail {
 				for (size_t edge : sortedEndpoints(node.end))
 					out.map[edge] = endIndex++;
 
-				/* allocate the additional slot for the self-loop (only its start
-				*	index is preserved) and advance the slot past the node */
+				/* allocate the additional slot for the self-loop (only its start index is preserved) */
 				if (layer.selfEdge < pLayers.edges.size()) {
 					out.map[layer.selfEdge] = std::min<size_t>(startIndex, endIndex);
 					if (startIndex < endIndex || (startIndex == endIndex && index <= pLayers.layers.size() / 2))
@@ -571,6 +570,12 @@ namespace ascg::detail {
 					else
 						out.endSelfEdge = true, endIndex += 2;
 				}
+
+				/* in case of the node being empty, allocate one mandatory slot for it */
+				else if (startIndex == slotIndex && endIndex == slotIndex)
+					++startIndex, ++endIndex;
+
+				/* update the node parameters and advance the slot past the node */
 				out.start = slotIndex;
 				slotIndex = std::max<size_t>(startIndex, endIndex);
 				out.size = slotIndex - out.start;
@@ -793,10 +798,11 @@ namespace ascg::detail {
 			for (const detail::Layer& layer : pLayers.layers) {
 				size_t width = layer.points.size();
 
-				/* find the node in the points and update the width accordingly */
+				/* find the node in the points and update the width accordingly
+				*	(minimum width of one for nodes to support potentially empty nodes) */
 				for (size_t i = 0; i < layer.points.size(); ++i) {
 					if (const detail::Node* node = layer.points[i].isNode(); node != nullptr) {
-						size_t _max = std::max<size_t>(node->start.size(), node->end.size());
+						size_t _max = std::max<size_t>({ 1, node->start.size(), node->end.size() });
 						width += _max - 1;
 
 						/* check if the node contains a self-loop and

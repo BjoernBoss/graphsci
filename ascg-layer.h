@@ -217,12 +217,13 @@ namespace ascg::detail {
 		};
 
 	private:
+		const std::set<size_t>& pNodes;
 		const detail::Ranges& pRanges;
 		detail::LayerState pLayerGraph;
 		std::vector<BuildEdge> pEdges;
 
 	public:
-		LayerBuilder(const detail::Ranges& ranges) : pRanges{ ranges } {}
+		LayerBuilder(const std::set<size_t>& nodes, const detail::Ranges& ranges) : pNodes{ nodes }, pRanges{ ranges } {}
 
 	private:
 		void fUpdatePrevPoint(detail::Point& point, size_t edge, size_t to) const {
@@ -505,37 +506,31 @@ namespace ascg::detail {
 			pLayerGraph.edges.clear();
 			pEdges.clear();
 
+			/* iterate over the nodes and create the layers for each node */
+			std::unordered_map<size_t, size_t> nodes;
+			for (size_t node : pNodes) {
+				size_t layer = pLayerGraph.layers.size();
+				nodes.insert({ node, layer });
+				pLayerGraph.layers.push_back(detail::Layer{ .index = node, .selfEdge = std::numeric_limits<size_t>::max() });
+			}
+
 			/* iterate over the ranges and select all relevant edges (first occurrence
-			*	for each) and update the edge states accordingly and setup the node map */
-			std::map<size_t, size_t> nodes;
-			std::set<Strand> seen;
+			*	for each) and write them to the layers and register the self-loops */
+			std::set<Strand> ranges;
 			for (size_t i = 0; i < pRanges.size(); ++i) {
 				Strand strand = Strand{ .first = pRanges[i].first, .last = pRanges[i].last };
-				if (!seen.insert(strand).second)
+				if (!ranges.insert(strand).second)
 					continue;
+				size_t first = nodes[strand.first], last = nodes[strand.last];
 
 				/* add the range to the list of edges */
+				size_t edge = pLayerGraph.edges.size();
 				pLayerGraph.edges.push_back(detail::Edge{ .headFirst = pRanges[i].headFirst, .headLast = pRanges[i].headLast });
-				pEdges.push_back(BuildEdge{ .first = strand.first, .last = strand.last });
+				pEdges.push_back(BuildEdge{ .first = first, .last = last, .stamp = 0 });
 
-				/* update the node list */
-				nodes[strand.first] = 0;
-				nodes[strand.last] = 0;
-			}
-
-			/* iterate over the nodes and create the layers for each node */
-			for (auto& [index, layer] : nodes) {
-				layer = pLayerGraph.layers.size();
-				pLayerGraph.layers.push_back(detail::Layer{ .index = index, .selfEdge = pLayerGraph.edges.size() });
-			}
-
-			/* iterate over the edges again and patch them up to point to the layer index and register self-loops */
-			for (size_t i = 0; i < pEdges.size(); ++i) {
-				BuildEdge& edge = pEdges[i];
-				edge.first = nodes[edge.first];
-				edge.last = nodes[edge.last];
-				if (edge.first == edge.last)
-					pLayerGraph.layers[edge.first].selfEdge = i;
+				/* check if this is a self-loop and register it to the layer (can at most be one) */
+				if (first == last)
+					pLayerGraph.layers[first].selfEdge = edge;
 			}
 
 			/* collect the overlap between the edges (used to select the side each edge will
