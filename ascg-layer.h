@@ -179,7 +179,9 @@ namespace ascg::detail {
 	*	3.	use dynamic programming to optimally place all strands better along the current alignment and if
 	*		this changes the layers, repeat from step 2
 	*	4.	run steps 2-3 with the two-sided and the one-sided barycenter and keep the order with fewer crossings
-	*		(two-sided tends to win on dense graphs, one-sided on sparse graphs, ties keep two-sided) */
+	*		(two-sided tends to win on dense graphs, one-sided on sparse graphs, ties keep two-sided)
+	*	5.	reset the nodes towards one side to either end of their layer, propagate the change outwards and
+	*		re-run steps 2-3, keeping the result only if it is strictly better */
 	class LayerBuilder {
 	private:
 		enum class Direction : uint8_t {
@@ -212,7 +214,7 @@ namespace ascg::detail {
 		};
 		struct StrandPath {
 			size_t crossings = 0;
-			float drift = 0;
+			float drift = 0.0f;
 		};
 
 	private:
@@ -257,6 +259,15 @@ namespace ascg::detail {
 			for (detail::Endpoint& ep : point.node().start)
 				fUpdateNextPoint(pLayerGraph.layers[index + 1].points[ep.other], ep.edge, to);
 		}
+		size_t fFindNode(size_t index) const {
+			const detail::Points& points = pLayerGraph.layers[index].points;
+
+			/* find the node (every layer contains exactly one) */
+			size_t where = 0;
+			while (points[where].isNode() == nullptr)
+				++where;
+			return where;
+		}
 		intptr_t fGetSwapDelta(const detail::Point& l, const detail::Point& r) const {
 			/* helper to compute the crossing delta between two single endpoints or a list of endpoints */
 			const auto swapPair = [](size_t lOther, size_t rOther) -> intptr_t {
@@ -297,7 +308,7 @@ namespace ascg::detail {
 			detail::Hasher hasher;
 			size_t crossings = 0;
 
-			/* helper to count the crossings */
+			/* helper to count the crossings of the given left point with the single right edge */
 			const auto addCrossings = [&crossings](const detail::Point& lPoint, size_t rOther) -> void {
 				if (const detail::Traverse* traverse = lPoint.isTraverse(); traverse != nullptr) {
 					if (rOther < traverse->prev)
@@ -798,6 +809,54 @@ namespace ascg::detail {
 			}
 			return true;
 		}
+		bool fResetLayer(size_t index, bool toFront, bool bidirectional, size_t& bestCrossings) {
+			detail::Points& points = pLayerGraph.layers[index].points;
+
+			/* find the node and check if it is already at the target position */
+			size_t where = fFindNode(index), target = (toFront ? 0 : points.size() - 1);
+			if (where == target)
+				return false;
+
+			/* preserve the current state (to revert worse graphs) and move the node to the edge */
+			std::vector<detail::Layer> layers = pLayerGraph.layers;
+			while (where != target) {
+				size_t next = detail::Towards(where, target);
+				fMovePoint(points[where], next, index);
+				fMovePoint(points[next], where, index);
+				std::swap(points[where], points[next]);
+				where = next;
+			}
+
+			/* propagate the changes through by reordering the layers overall to include the new shifted node */
+			for (size_t i = index + 1; i < pLayerGraph.layers.size() && fReorderLayer(i, Direction::backwards); ++i);
+			for (size_t i = index; i > 0 && fReorderLayer(i - 1, Direction::forwards); --i);
+
+			/* perform local layer and strand repairs (first time only once to
+			*	check if there is any value in it, and the second time fully) */
+			for (bool initial = true;; initial = false) {
+				for (bool dirty = true; dirty; dirty = (dirty && !initial)) {
+					dirty = fShiftLayers();
+					dirty = (fShiftStrands() || dirty);
+				}
+
+				/* compute the current crossing cound and check if the layers should be fully opimized */
+				size_t crossings = fMeasureLayers().second;
+				if (crossings <= bestCrossings) {
+					if (initial)
+						continue;
+					crossings = fOptimizeLayers(bidirectional);
+				}
+
+				/* check if the old graph should be recovered, as it has not been
+				*	meaningfully improved and otherwise commit the better state */
+				if (crossings >= bestCrossings) {
+					pLayerGraph.layers = std::move(layers);
+					return false;
+				}
+				bestCrossings = crossings;
+				return true;
+			}
+		}
 
 	private:
 		bool fReorderLayers(bool bidirectional) {
@@ -894,9 +953,41 @@ namespace ascg::detail {
 				return bestCrossings;
 			}
 		}
+		void fResetLayers(bool bidirectional, size_t bestCrossings, ascg::IterationStop auto&& stopTest) {
+			if (bestCrossings == 0)
+				return;
+
+			/* setup the list of relevant nodes sorted by the minimum number of edges they have per side (ignore any
+			*	nodes with too many edges on either side as they are very likely to be pulled back again anyways) */
+			std::vector<std::pair<size_t, size_t>> nodes;
+			for (size_t i = 0; i < pLayerGraph.layers.size(); ++i) {
+				const detail::Node& node = pLayerGraph.layers[i].points[fFindNode(i)].node();
+				size_t edges = std::min<size_t>(node.start.size(), node.end.size());
+				if (pLayerGraph.layers[i].points.size() <= 1 || edges >= 2)
+					continue;
+				nodes.push_back({ edges, i });
+			}
+			std::ranges::sort(nodes);
+
+			/* reset each layer into either direction and restart the iteration if a better layout has been found */
+			size_t node = 0;
+			for (size_t stamina = 0; (stamina <= nodes.size() && bestCrossings > 0); ++stamina) {
+				size_t layer = nodes[node++].first;
+				if (node >= nodes.size())
+					node = 0;
+
+				/* try each direction and check if the layout has improved */
+				for (size_t dir = 0; dir < 2; ++dir) {
+					if (stopTest())
+						return;
+					if (fResetLayer(layer, (dir == 0), bidirectional, bestCrossings))
+						stamina = 0, dir = 2;
+				}
+			}
+		}
 
 	public:
-		detail::LayerState build() {
+		detail::LayerState build(ascg::IterationStop auto&& stopTest) {
 			/* check if the ranges are empty, in which case nothing needs to be done,
 			*	and otherwise create the initial layers (cannot be empty anymore) */
 			if (pRanges.empty())
@@ -908,8 +999,14 @@ namespace ascg::detail {
 			std::vector<detail::Layer> layers{ pLayerGraph.layers };
 			size_t bidirectional = fOptimizeLayers(true);
 			std::swap(pLayerGraph.layers, layers);
-			if (fOptimizeLayers(false) >= bidirectional)
+			size_t unidirectional = fOptimizeLayers(false);
+			bool biBetter = (unidirectional >= bidirectional);
+			if (biBetter)
 				pLayerGraph.layers = std::move(layers);
+
+			/* try to escape the local minimum by resetting node
+			*	positions (keeping with the better optimization direction) */
+			fResetLayers(biBetter, std::min<size_t>(bidirectional, unidirectional), stopTest);
 
 			/* return the complete generated layers from the internal state */
 			detail::LayerState state;

@@ -15,7 +15,7 @@ namespace ascg {
 
 	private:
 		ascg::Graph fFinalize(ascg::IterationStop auto&& stopTest, const ascg::Theme& theme) const {
-			detail::LayerState layers = detail::LayerBuilder{ pNodes, pRanges }.build();
+			detail::LayerState layers = detail::LayerBuilder{ pNodes, pRanges }.build(stopTest);
 			detail::GridState grid = detail::GridBuilder{ layers }.build(stopTest);
 			auto [rows, map] = detail::Renderer{ layers, grid }.draw(theme);
 			return ascg::Graph{ .rows = std::move(rows), .map = std::move(map) };
