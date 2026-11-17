@@ -211,7 +211,6 @@ namespace ascg::detail {
 			size_t stamp = 0;
 		};
 		struct StrandPath {
-			std::vector<size_t> steps;
 			size_t crossings = 0;
 			float drift = 0;
 		};
@@ -366,7 +365,6 @@ namespace ascg::detail {
 			for (size_t i = 0;; ++i) {
 				paths[i].crossings = crossings;
 				paths[i].drift = getDrift(start, i);
-				paths[i].steps.push_back(i);
 
 				/* check if the end has been reached and otherwise update the actual current crossings */
 				if (i >= next.size())
@@ -381,7 +379,7 @@ namespace ascg::detail {
 					crossings = getMoved(start, next[i].traverse().prev, crossings);
 			}
 		}
-		void fAdvancePaths(size_t index, size_t edge, const std::vector<StrandPath>& current, std::vector<StrandPath>& paths, size_t& actual) const {
+		void fAdvancePaths(size_t index, size_t edge, const std::vector<StrandPath>& current, std::vector<StrandPath>& paths, std::vector<size_t>& predecessors, size_t& actual) const {
 			const detail::Points& prev = pLayerGraph.layers[index].points;
 			const detail::Points& next = pLayerGraph.layers[index + 1].points;
 
@@ -407,8 +405,8 @@ namespace ascg::detail {
 
 			/* iterate over the potential new endpoint paths and find
 			*	the cheapest step from the current paths to the position */
-			if (paths.size() <= next.size())
-				paths.resize(next.size() + 1);
+			paths.resize(next.size() + 1);
+			predecessors.resize(next.size() + 1);
 			for (size_t i = 0;; ++i) {
 				StrandPath& path = paths[i];
 
@@ -422,10 +420,10 @@ namespace ascg::detail {
 						best = j, bestCrossings = curCrossings, bestDrift = curDrift;
 				}
 
-				/* setup the new best path */
+				/* setup the new best path and write the predecessor back */
 				path.crossings = bestCrossings;
 				path.drift = bestDrift;
-				(path.steps = current[best].steps).push_back(i);
+				predecessors[i] = best;
 
 				/* check if the end has been reached and otherwise update the actual current crossings */
 				if (i >= next.size())
@@ -755,22 +753,25 @@ namespace ascg::detail {
 
 			/* create the set of potential paths from the first to the last node and track their crossing counts
 			*	as well as the current crossings (dynamic programming approach to finding cheapest paths) */
+			std::vector<std::vector<size_t>> predecessors;
+			predecessors.reserve(edge.last - edge.first - 2);
 			std::vector<StrandPath> paths, last;
 			size_t crossings = 0;
 			fSetupPaths(index, paths, crossings);
 			for (size_t i = edge.first + 1; i < edge.last - 1; ++i) {
 				std::swap(paths, last);
-				fAdvancePaths(i, index, last, paths, crossings);
+				fAdvancePaths(i, index, last, paths, predecessors.emplace_back(), crossings);
 			}
 
 			/* check if a best path has been found, which is better than the current path
 			*	(will then make the layers strictly better, thereby being a monotonic algorithm) */
-			const StrandPath& best = paths[fFinalizePaths(index, paths, crossings)];
-			if (best.crossings >= crossings)
+			size_t bestIndex = fFinalizePaths(index, paths, crossings);
+			if (paths[bestIndex].crossings >= crossings)
 				return false;
 
-			/* move the points into position (only the traversals, as the nodes will stay intact) */
-			for (size_t i = edge.first + 1; i < edge.last; ++i) {
+			/* move the points into position (only the traversals, as the nodes will
+			*	stay intact; backwards to allow the predecessor-path to be unrolled) */
+			for (size_t i = edge.last - 1; i > edge.first; --i) {
 				detail::Points& points = pLayerGraph.layers[i].points;
 
 				/* find the index of the current point */
@@ -778,10 +779,13 @@ namespace ascg::detail {
 				while (points[where].isTraverse() == nullptr || points[where].traverse().edge != index)
 					++where;
 
-				/* extract the target position the point actually needs to be moved to */
-				size_t target = best.steps[i - edge.first - 1];
+				/* extract the target position the point actually needs
+				*	to be moved to and backtrack the best index */
+				size_t target = bestIndex;
 				if (target > where)
 					--target;
+				if (i - edge.first >= 2)
+					bestIndex = predecessors[i - edge.first - 2][bestIndex];
 
 				/* move the point to the new position */
 				while (where != target) {
