@@ -5,6 +5,8 @@
 #include "ascg-common.h"
 
 namespace ascg::detail {
+	static constexpr size_t EdgeCountNodeReset = 2;
+
 	template <class Type>
 	struct SmallList {
 	private:
@@ -957,7 +959,7 @@ namespace ascg::detail {
 			for (size_t i = 0; i < pLayerGraph.layers.size(); ++i) {
 				const detail::Node& node = pLayerGraph.layers[i].points[fFindNode(i)].node();
 				size_t edges = std::min<size_t>(node.start.size(), node.end.size());
-				if (pLayerGraph.layers[i].points.size() > 1 && edges < 2)
+				if (pLayerGraph.layers[i].points.size() > 1 && edges < detail::EdgeCountNodeReset)
 					nodes.push_back({ edges, i });
 			}
 

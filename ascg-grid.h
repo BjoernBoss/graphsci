@@ -542,15 +542,17 @@ namespace ascg::detail {
 				return out;
 			};
 
-			/* iterate over the nodes and assign each edge the index it
-			*	lies at (same map used for both starting and ending) */
+			/* iterate over the nodes and assign each edge the index it will lie at (same map used for
+			*	both starting and ending), but ensure there is an empty cell between every traversal to
+			*	ensure there is enough space for the transitions to wiggle around */
 			size_t slotIndex = 0;
 			for (size_t i = 0; i < layer.points.size(); ++i) {
 				const detail::Point& point = layer.points[i];
 
 				/* check if its a simple traversal */
 				if (const detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
-					out.map[traverse->edge] = slotIndex++;
+					out.map[traverse->edge] = slotIndex;
+					slotIndex += 2;
 					continue;
 				}
 				const detail::Node& node = point.node();
@@ -575,14 +577,14 @@ namespace ascg::detail {
 				else if (startIndex == slotIndex && endIndex == slotIndex)
 					++startIndex, ++endIndex;
 
-				/* update the node parameters and advance the slot past the node */
+				/* update the node parameters and advance the slot past the node (with the one space between) */
 				out.start = slotIndex;
-				slotIndex = std::max<size_t>(startIndex, endIndex);
+				slotIndex = std::max<size_t>(startIndex, endIndex) + 1;
 				out.size = slotIndex - out.start;
 			}
 
 			/* compute the graph shift to center the layer and apply it to the indices */
-			if (size_t shift = (width - slotIndex) / 2; shift > 0) {
+			if (size_t shift = (width <= slotIndex ? 0 : (width - slotIndex) / 2); shift > 0) {
 				out.start += shift;
 				for (auto& [_, slot] : out.map)
 					slot += shift;
@@ -796,7 +798,8 @@ namespace ascg::detail {
 			/* compute the minimum width to give to the graph */
 			size_t totalWidth = 0;
 			for (const detail::Layer& layer : pLayers.layers) {
-				size_t width = layer.points.size();
+				/* initialize the width with two slots per transition, which all but one point must be */
+				size_t width = 2 * layer.points.size() - 1;
 
 				/* find the node in the points and update the width accordingly
 				*	(minimum width of one for nodes to support potentially empty nodes) */
