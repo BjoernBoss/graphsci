@@ -280,6 +280,14 @@ namespace ascg::detail {
 			for (size_t i = begin; i < end; ++i)
 				row.push_back(detail::Cell{ slice[i].used ? detail::CellKind::vertical : detail::CellKind::empty });
 		}
+		void fFillRotation(detail::Row& row, const std::vector<Slot>& slice, size_t from, size_t target) const {
+			bool leftwards = (target < from);
+
+			row.push_back(detail::Cell{ leftwards ? detail::CellKind::rightBottom : detail::CellKind::rightTop });
+			for (size_t i : detail::MinMaxWalk{ from, target, true })
+				row.push_back(detail::Cell{ slice[i].used ? detail::CellKind::crossing : detail::CellKind::horizontal });
+			row.push_back(detail::Cell{ leftwards ? detail::CellKind::leftTop : detail::CellKind::leftBottom });
+		}
 		size_t fAddSliceEdge(size_t where, std::vector<Slot>& slice, bool top) {
 			/* check if the slice contains any arrows in the given direction (caller
 			*	is responsible for ensuring that the node is the immediate neighbor) */
@@ -319,21 +327,18 @@ namespace ascg::detail {
 				detail::Row& row = *pGrid.emplace(pGrid.begin() + where++);
 				row.reserve(slice.size());
 
-				/* compute the range where the current rotation occurs */
-				size_t beginRotation = (leftwards ? begin - distance : end - 1);
-				size_t endRotation = (leftwards ? begin + 1 : end + distance);
+				/* add the traversals and centered rotation to the current row */
+				if (leftwards) {
+					fFillTraversals(row, slice, 0, begin - distance);
+					fFillRotation(row, slice, begin, begin - distance);
+				}
+				else {
+					fFillTraversals(row, slice, 0, end - 1);
+					fFillRotation(row, slice, end - 1, end + distance - 1);
+				}
+				fFillTraversals(row, slice, row.size(), slice.size());
 
-				/* add all traversals before the next rotation */
-				fFillTraversals(row, slice, 0, beginRotation);
-
-				/* add the next rotation itself */
-				row.push_back(detail::Cell{ leftwards ? detail::CellKind::rightBottom : detail::CellKind::rightTop });
-				for (size_t i : detail::MinMaxWalk{ beginRotation, endRotation - 1, true })
-					row.push_back(detail::Cell{ slice[i].used ? detail::CellKind::crossing : detail::CellKind::horizontal });
-				row.push_back(detail::Cell{ leftwards ? detail::CellKind::leftTop : detail::CellKind::leftBottom });
-
-				/* add the traversals after the rotation and update the slice itself and the indices */
-				fFillTraversals(row, slice, endRotation, slice.size());
+				/* update the slice itself and the indices */
 				if (leftwards) {
 					std::swap(slice[begin], slice[begin - distance]);
 					++begin;
@@ -350,30 +355,51 @@ namespace ascg::detail {
 			if (flushEdges)
 				where = fAddSliceEdge(where, slice, true);
 
-			/* find the next misplaced entry, which can be moved to its new placement (loop until they have all
-			*	been moved; must always find one, as the caller guarantees that the slice targets are possible) */
-			for (size_t i = 0; i < slice.size();) {
-				if (!slice[i].used || slice[i].target == i) {
-					++i;
-					continue;
-				}
+			/* iterate over the slice and move the slots into position (must be finishable as
+			*	the caller guarantees that the slice targets are possible and well ordered) */
+			while (true) {
+				detail::Row* row = nullptr;
+				size_t lastEnd = 0;
 
-				/* check if the entire range is free for the slice slot to be rotated into place */
-				bool blocked = false;
-				for (size_t j : detail::MinMaxWalk{ i, slice[i].target, false }) {
-					if (j == i || !slice[j].used)
+				/* find the next misplaced entry, which can be moved to its new placement */
+				for (size_t i = 0; i < slice.size(); ++i) {
+					if (!slice[i].used || slice[i].target == i) {
+						if (slice[i].used) lastEnd = i + 1;
 						continue;
-					blocked = true;
-					break;
+					}
+
+					/* check if a row needs to be allocated */
+					if (row == nullptr) {
+						row = &*pGrid.emplace(pGrid.begin() + where++);
+						row->reserve(slice.size());
+					}
+
+					/* find the target until which the slot can be corrected (for leftwards, just move up to the last end, up to which
+					*	the previous slot will already have used or reserved the row; otherwise, move until the neighbor exists again) */
+					size_t target = i;
+					if (slice[i].target < i)
+						target = std::max<size_t>(lastEnd, slice[i].target);
+					else while (target < slice[i].target && !slice[target + 1].used)
+						++target;
+
+					/* fill all prior slots and then either add the simple step itself or the
+					*	rotation and update the indices past the just modified last slot */
+					fFillTraversals(*row, slice, row->size(), std::min<size_t>(target, i));
+					if (target == i)
+						row->push_back(detail::Cell{ detail::CellKind::vertical });
+					else {
+						fFillRotation(*row, slice, i, target);
+						std::swap(slice[i], slice[target]);
+						i = std::max<size_t>(i, target);
+					}
+					lastEnd = row->size();
 				}
 
-				/* apply the rotation, if its not blocked, and update the indices */
-				if (blocked)
-					++i;
-				else {
-					where = fInsertRotation(slice, i, i + 1, slice[i].target, where);
-					i = 0;
-				}
+				/* check if no row has been started, in which case the slice must be
+				*	correct, and otherwise finish the row and start another iteration */
+				if (row == nullptr)
+					break;
+				fFillTraversals(*row, slice, row->size(), slice.size());
 			}
 
 			/* write out the final slice edges */
@@ -544,15 +570,16 @@ namespace ascg::detail {
 
 			/* iterate over the nodes and assign each edge the index it will lie at (same map used for
 			*	both starting and ending), but ensure there is an empty cell between every traversal to
-			*	ensure there is enough space for the transitions to wiggle around */
+			*	give the transitions space to move around without having to wait for others to move first */
 			size_t slotIndex = 0;
 			for (size_t i = 0; i < layer.points.size(); ++i) {
 				const detail::Point& point = layer.points[i];
+				if (i > 0)
+					++slotIndex;
 
 				/* check if its a simple traversal */
 				if (const detail::Traverse* traverse = point.isTraverse(); traverse != nullptr) {
-					out.map[traverse->edge] = slotIndex;
-					slotIndex += 2;
+					out.map[traverse->edge] = slotIndex++;
 					continue;
 				}
 				const detail::Node& node = point.node();
@@ -577,14 +604,14 @@ namespace ascg::detail {
 				else if (startIndex == slotIndex && endIndex == slotIndex)
 					++startIndex, ++endIndex;
 
-				/* update the node parameters and advance the slot past the node (with the one space between) */
+				/* update the node parameters and advance the slot past the node */
 				out.start = slotIndex;
-				slotIndex = std::max<size_t>(startIndex, endIndex) + 1;
+				slotIndex = std::max<size_t>(startIndex, endIndex);
 				out.size = slotIndex - out.start;
 			}
 
 			/* compute the graph shift to center the layer and apply it to the indices */
-			if (size_t shift = (width <= slotIndex ? 0 : (width - slotIndex) / 2); shift > 0) {
+			if (size_t shift = (width - slotIndex) / 2; shift > 0) {
 				out.start += shift;
 				for (auto& [_, slot] : out.map)
 					slot += shift;
@@ -798,7 +825,7 @@ namespace ascg::detail {
 			/* compute the minimum width to give to the graph */
 			size_t totalWidth = 0;
 			for (const detail::Layer& layer : pLayers.layers) {
-				/* initialize the width with two slots per transition, which all but one point must be */
+				/* initialize the width with one slot per point and one empty slot between any two points */
 				size_t width = 2 * layer.points.size() - 1;
 
 				/* find the node in the points and update the width accordingly
