@@ -133,8 +133,11 @@ namespace ascg::detail {
 	*	1.	construct the grid row by row and straighten it by removing unnecessary dents and corners
 	*	2.	repeat: fix interlocks by trial (apply a fix, straighten, keep the result if the score improves and otherwise revert
 	*		it and remember the failed interlock), compress the grid, and shift nodes sideways to unblock further straightenings
+	*	3.	once no node can be shifted anymore, shift whole chunks of neighboring nodes sideways, and keep every shift,
+	*		which strictly improves the score, until no chunk improves the grid anymore, and repeat 2. once more
 	*	All loops are bounded: a straightening step strictly shortens a transition, the fix scan only restarts on strict
-	*	score improvements, failed fixes are not retried, and every node shift is tried at most once per best grid */
+	*	score improvements, failed fixes are not retried, every node shift is tried at most once per best grid, and the chunks
+	*	are only shifted again after a strict score improvement */
 	class GridBuilder {
 	private:
 		enum class Alignment : uint8_t {
@@ -235,7 +238,7 @@ namespace ascg::detail {
 			}
 			return score;
 		}
-		intptr_t fApplyBestGrid(detail::GridState& bestGrid, GridScore& bestScore) {
+		intptr_t fApplyBestGrid(detail::GridState& bestGrid, GridScore& bestScore, bool onlyKeepBetter) {
 			GridScore score = fMeasureGrid();
 
 			/* compare the grid score to determine if a change has occurred */
@@ -249,10 +252,11 @@ namespace ascg::detail {
 			else if (score.corners != bestScore.corners)
 				cmp = (bestScore.corners - score.corners);
 
-			/* check if a new best graph has been encountered and apply it and notify the caller */
+			/* check if a new best graph has been encountered and apply
+			*	it and otherwise check if the graph should be reverted */
 			if (cmp > 0)
 				bestGrid = pGrid, bestScore = score;
-			else if (cmp < 0)
+			else if (onlyKeepBetter ? (cmp <= 0) : (cmp < 0))
 				pGrid = bestGrid;
 			return cmp;
 		}
@@ -287,6 +291,26 @@ namespace ascg::detail {
 			for (size_t i : detail::MinMaxWalk{ from, target, true })
 				row.push_back(detail::Cell{ slice[i].used ? detail::CellKind::crossing : detail::CellKind::horizontal });
 			row.push_back(detail::Cell{ leftwards ? detail::CellKind::leftTop : detail::CellKind::leftBottom });
+		}
+		void fRelocateArrows(std::vector<Slot>& slice, detail::Row& upper, detail::Row& lower, bool columnIsTarget) const {
+			/* check if the slice will result in any changes and otherwise the arrows dont need to be updated */
+			bool rotating = false;
+			for (size_t i = 0; i < slice.size() && !rotating; ++i)
+				rotating = (slice[i].used && slice[i].target != i);
+			if (!rotating)
+				return;
+
+			/* remove the arrow head state between the two rows from the grid and cache it
+			*	into the slice, for it to be re-applied once the slice has been corrected */
+			for (size_t i = 0; i < slice.size(); ++i) {
+				if (!slice[i].used)
+					continue;
+				size_t column = (columnIsTarget ? slice[i].target : i);
+				if (upper[column].kind == detail::CellKind::arrowBottom)
+					slice[i].bottom = true, upper[column].kind = detail::CellKind::vertical;
+				if (lower[column].kind == detail::CellKind::arrowTop)
+					slice[i].top = true, lower[column].kind = detail::CellKind::vertical;
+			}
 		}
 		size_t fAddSliceEdge(size_t where, std::vector<Slot>& slice, bool top) {
 			/* check if the slice contains any arrows in the given direction (caller
@@ -428,16 +452,16 @@ namespace ascg::detail {
 					row.push_back(detail::Cell{ (prev[i].anyBottom() || next[i].anyTop()) ? detail::CellKind::vertical : detail::CellKind::empty });
 			}
 		}
-		void fInsertEmptyColumn(bool leftSide, auto&... values) {
+		void fInsertEmptyColumns(bool leftSide, size_t count, auto&... values) {
 			size_t where = (leftSide ? 0 : pGrid[0].size());
 
 			/* insert the new empty cells */
 			for (size_t i = 0; i < pGrid.size(); ++i)
-				pGrid[i].insert(pGrid[i].begin() + where, detail::Cell{});
+				pGrid[i].insert(pGrid[i].begin() + where, count, detail::Cell{});
 
 			/* apply the shift to all values */
 			if (leftSide)
-				((values += 1), ...);
+				((values += count), ...);
 		}
 		std::pair<size_t, size_t> fCreateEmptyCell(size_t x, size_t y, bool leftwards) {
 			if (pGrid[y][x].isEmpty())
@@ -447,28 +471,7 @@ namespace ascg::detail {
 			*	cells (to ensure all upcoming operations can perform the shifts without checking bounds) */
 			auto shiftIntoRange = std::ranges::subrange(pGrid[y].begin() + (leftwards ? 0 : x + 1), (leftwards ? pGrid[y].begin() + x : pGrid[y].end()));
 			if (!std::ranges::any_of(shiftIntoRange, [](auto v) { return (v == detail::CellKind::empty); }, &detail::Cell::kind))
-				fInsertEmptyColumn(leftwards, x);
-
-			/* helper to relocate the arrow-heads between the shifted row and its neighbor */
-			const auto relocateArrows = [](std::vector<Slot>& slice, detail::Row& upper, detail::Row& lower, bool columnIsTarget) {
-				/* check if the slice will result in any changes and otherwise the arrows dont need to be updated */
-				bool rotating = false;
-				for (size_t i = 0; i < slice.size() && !rotating; ++i)
-					rotating = (slice[i].used && slice[i].target != i);
-				if (!rotating)
-					return;
-
-				/* remove the arrow head state from the grid and cache it into the slice, for it to be re-applied once finished */
-				for (size_t i = 0; i < slice.size(); ++i) {
-					if (!slice[i].used)
-						continue;
-					size_t column = (columnIsTarget ? slice[i].target : i);
-					if (upper[column].kind == detail::CellKind::arrowBottom)
-						slice[i].bottom = true, upper[column].kind = detail::CellKind::vertical;
-					if (lower[column].kind == detail::CellKind::arrowTop)
-						slice[i].top = true, lower[column].kind = detail::CellKind::vertical;
-				}
-			};
+				fInsertEmptyColumns(leftwards, 1, x);
 
 			/* setup the slice to move the previous entries (may invalidate references) */
 			std::vector<Slot> slice(pGrid[y].size(), Slot{});
@@ -495,7 +498,7 @@ namespace ascg::detail {
 				}
 
 				/* relocate the arrow-heads and insert the shifting */
-				relocateArrows(slice, prev, cur, false);
+				fRelocateArrows(slice, prev, cur, false);
 				y = fInsertSliceCorrections(slice, y, true);
 			}
 
@@ -522,7 +525,7 @@ namespace ascg::detail {
 				}
 
 				/* relocate the arrow-heads and insert the shifting */
-				relocateArrows(slice, cur, next, true);
+				fRelocateArrows(slice, cur, next, true);
 				fInsertSliceCorrections(slice, y + 1, true);
 			}
 
@@ -1184,7 +1187,7 @@ namespace ascg::detail {
 			/* check if the index lies right at the bounds, in which case
 			*	the grid needs to be extended to provide space for a detour */
 			if (leftwards ? xCorner == 0 : xCorner + 1 == pGrid[yCorner].size())
-				fInsertEmptyColumn(leftwards, xCorner);
+				fInsertEmptyColumns(leftwards, 1, xCorner);
 
 			/* ensure an empty space exists on the other side of the corner to bend around (caller
 			*	must guarantee that the corner does not point into the empty spot to prevent invalid graphs)
@@ -1271,7 +1274,7 @@ namespace ascg::detail {
 
 			/* check if an empty column needs to be inserted */
 			if (xSpacer == 0 || xSpacer + 1 == pGrid[yBase].size())
-				fInsertEmptyColumn(xSpacer == 0, xSpacer, xBlock, xBase);
+				fInsertEmptyColumns(xSpacer == 0, 1, xSpacer, xBlock, xBase);
 			xSpacer = detail::AwayFrom(xSpacer, xBase);
 
 			/* fetch the two corner kinds to be inserted into the detour */
@@ -1683,6 +1686,109 @@ namespace ascg::detail {
 		}
 
 	private:
+		void fFullStraighten(bool leftFirst) {
+			Alignment first = (leftFirst ? Alignment::leftwards : Alignment::rightwards);
+			Alignment second = (leftFirst ? Alignment::rightwards : Alignment::leftwards);
+
+			/* reset the straighten state (keep across straightenings to prevent repeated allocations) */
+			pStraightenList.clear();
+			if (pStraightenRows.size() < pGrid.size())
+				pStraightenRows.resize(pGrid.size());
+
+			/* collect all of the corners into the change cache */
+			for (size_t y = 0; y < pGrid.size(); ++y) {
+				const detail::Row& gridRow = pGrid[y];
+				StraightenRow& changeRow = pStraightenRows[y];
+				changeRow.corners.clear();
+				changeRow.tracked = { .rect = GridRect{}, .age = 0 };
+
+				for (size_t x = 0; x < gridRow.size(); ++x) {
+					if (gridRow[x].anyCorner())
+						changeRow.corners.push_back(StraightenCorner{ .tracked = {}, .x = x });
+				};
+			}
+
+			/* first straighten into the direction of the last fix, then into the opposite direction and finally
+			*	outwards from the center (each pass unblocks corners for the next and is necessary for better results) */
+			for (auto align : { first, second, Alignment::outwards }) {
+				size_t halfGrid = 0;
+
+				/* check if this is the outwards move, in which case the center axis is needed to determine
+				*	the direction (fixed for the entire pass, to prevent drift or oscillations of corners) */
+				if (align == Alignment::outwards) {
+					size_t left = pGrid[0].size() - 1, right = 0;
+
+					/* find the leftmost and rightmost edges over all columns (there
+					*	must be at least one non-empty row and hence left <= right) */
+					for (const detail::Row& row : pGrid) {
+						size_t l = 0, r = row.size() - 1;
+						while (l < left && row[l].isEmpty())
+							++l;
+						while (r > right && row[r].isEmpty())
+							--r;
+						left = std::min<size_t>(left, l);
+						right = std::max<size_t>(right, r);
+					}
+					halfGrid = (left + right) / 2;
+				}
+
+				/* invalidate the row rectangles as they depend on the orientation of the straightening
+				*	and apply the straightening until no more corners are found into the given direction */
+				for (StraightenRow& row : pStraightenRows)
+					row.tracked.rect = GridRect{};
+				while (fStraightenGrid(align, halfGrid));
+			}
+
+			/* perform a shrinking to ensure irrelevant rows opened by the
+			*	straightening do not strain the remainder of the algorithm */
+			fShrinkVertical();
+		}
+		bool fFullFixInterlocks(ascg::IterationStop auto&& stopIteration) {
+			/* collect the current best grid state as basis for interlock fixing and
+			*	cache the best state to be able to recover it on worse performances */
+			detail::GridState bestGrid = pGrid;
+			GridScore bestScore = fMeasureGrid();
+			bool stopped = false;
+
+			/* alternate the fix direction until a pass yields no improvement
+			*	(at least one pass per direction) or the stop has been requested */
+			for (size_t i = 0; !stopped; ++i) {
+				bool dirty = false, leftwards = (i % 2 == 0);
+
+				/* forward-iterate the interlock fixing into the given
+				*	direction until one results in a positive outcome */
+				GridPoint point{};
+				size_t fixInterlockHash = 0;
+				while (!(stopped = stopIteration()) && fFixInterlocks(leftwards, point, fixInterlockHash)) {
+					/* first straighten the graph into the given direction, in order for any fix-changes
+					*	to propagate properly, and then perform a general straightening and shrinking */
+					fFullStraighten(leftwards);
+
+					/* advance the point and check if a new best grid has been reached and reset the state accordingly (if the
+					*	fix worsens the grid, preserve the interlock-identification to prevent repeated fixing; keep the new
+					*	state, if the results do not change, as the interlock fixing may allow for future fixes to be applied) */
+					++point.x;
+					if (intptr_t cmp = fApplyBestGrid(bestGrid, bestScore, false); cmp > 0)
+						point = { .x = 0, .y = 0 }, dirty = true;
+					else if (cmp < 0)
+						pFailedFixes.insert(fixInterlockHash);
+				}
+
+				/* check if the fixing results in changes, in which
+				*	case fixes into the other direction can be repeated */
+				if (i > 0 && !dirty)
+					break;
+			}
+
+			/* reset the grid to the best state (to capture minor best scores as well) */
+			std::swap(pGrid, bestGrid);
+			return !stopped;
+		}
+
+	private:
+		bool fIsNodeRow(size_t y) const {
+			return (std::ranges::find(pGrid[y], detail::CellKind::node, &detail::Cell::kind) != pGrid[y].end());
+		}
 		int8_t fCheckShiftPreference(size_t x, size_t y, bool forwards) const {
 			size_t last = (forwards ? pGrid.size() - 1 : 0);
 
@@ -1703,6 +1809,40 @@ namespace ascg::detail {
 			if (pGrid[y][x].cornerRight())
 				return 1;
 			return 0;
+		}
+		size_t fFindShiftDistance(size_t yPrev, size_t yNext, bool leftwards) const {
+			std::vector<size_t> counts(pGrid[yNext].size(), 0);
+			size_t best = 0;
+
+			/* follow all transitions leaving the previous row, which reach the next row, and compute their displacement to determine
+			*	the distance required to potentially straighten them (look at both neighbors to track transitions coming out of nodes) */
+			for (size_t x = 0; x < pGrid[yPrev].size(); ++x) {
+				size_t xHead = x, yHead = yPrev + 1;
+				if (!pGrid[yPrev][x].anyBottom() && !pGrid[yHead][xHead].anyTop())
+					continue;
+				bool horizontal = false, increasing = true;
+
+				/* follow the transition until it leaves the rows or reaches a node */
+				while (yHead > yPrev && yHead < yNext && !pGrid[yHead][xHead].isNode()) {
+					if (const detail::Cell& cell = pGrid[yHead][xHead]; cell.anyCorner())
+						increasing = (horizontal ? cell.cornerBottom() : cell.cornerRight()), horizontal = !horizontal;
+					(horizontal ? xHead : yHead) += (increasing ? 1 : -1);
+				}
+
+				/* check if the transition reached the next row (or was
+				*	a self-loop) and was displaced in the tested direction */
+				if (yHead <= yPrev || xHead == x || (xHead < x) == leftwards)
+					continue;
+
+				/* check if the distance is more frequent than the current
+				*	best distance and update it (prefer the shorter distances) */
+				size_t distance = (leftwards ? xHead - x : x - xHead);
+				if (++counts[distance] > counts[best] || (counts[distance] == counts[best] && distance < best))
+					best = distance;
+			}
+
+			/* select the most frequent shift distance (default to 1 if none could be determined) */
+			return (best == 0 ? 1 : best);
 		}
 		bool fShiftNode(std::map<NodePoint, intptr_t>& open, std::set<NodePoint>& closed, std::optional<ShiftTarget>& current) {
 			/* node placement is identified by its index and first cell position, as for each grid, the
@@ -1818,111 +1958,155 @@ namespace ascg::detail {
 
 			/* check if the previous or upcoming row also contains nodes (due to nodes with few
 			*	or no transitions being moved), in which case padding rows need to be inserted */
-			if (yEmpty + 1 < pGrid.size() && std::ranges::find(pGrid[yEmpty + 1], detail::CellKind::node, &detail::Cell::kind) != pGrid[yEmpty + 1].end())
+			if (yEmpty + 1 < pGrid.size() && fIsNodeRow(yEmpty + 1))
 				fInsertNullRow(yEmpty + 1);
-			if (yEmpty > 0 && std::ranges::find(pGrid[yEmpty - 1], detail::CellKind::node, &detail::Cell::kind) != pGrid[yEmpty - 1].end())
+			if (yEmpty > 0 && fIsNodeRow(yEmpty - 1))
 				fInsertNullRow(yEmpty);
 			return true;
 		}
+		void fShiftRows(size_t yFirst, size_t yLast, bool leftwards, size_t distance) {
+			size_t emptyColumns = 0, edge = (leftwards ? 0 : pGrid[yFirst].size() - 1);
 
-	private:
-		void fBuildStraighten(bool leftFirst) {
-			Alignment first = (leftFirst ? Alignment::leftwards : Alignment::rightwards);
-			Alignment second = (leftFirst ? Alignment::rightwards : Alignment::leftwards);
-
-			/* reset the straighten state (keep across straightenings to prevent repeated allocations) */
-			pStraightenList.clear();
-			if (pStraightenRows.size() < pGrid.size())
-				pStraightenRows.resize(pGrid.size());
-
-			/* collect all of the corners into the change cache */
-			for (size_t y = 0; y < pGrid.size(); ++y) {
-				const detail::Row& gridRow = pGrid[y];
-				StraightenRow& changeRow = pStraightenRows[y];
-				changeRow.corners.clear();
-				changeRow.tracked = { .rect = GridRect{}, .age = 0 };
-
-				for (size_t x = 0; x < gridRow.size(); ++x) {
-					if (gridRow[x].anyCorner())
-						changeRow.corners.push_back(StraightenCorner{ .tracked = {}, .x = x });
-				};
-			}
-
-			/* first straighten into the direction of the last fix, then into the opposite direction and finally
-			*	outwards from the center (each pass unblocks corners for the next and is necessary for better results) */
-			for (auto align : { first, second, Alignment::outwards }) {
-				size_t halfGrid = 0;
-
-				/* check if this is the outwards move, in which case the center axis is needed to determine
-				*	the direction (fixed for the entire pass, to prevent drift or oscillations of corners) */
-				if (align == Alignment::outwards) {
-					size_t left = pGrid[0].size() - 1, right = 0;
-
-					/* find the leftmost and rightmost edges over all columns (there
-					*	must be at least one non-empty row and hence left <= right) */
-					for (const detail::Row& row : pGrid) {
-						size_t l = 0, r = row.size() - 1;
-						while (l < left && row[l].isEmpty())
-							++l;
-						while (r > right && row[r].isEmpty())
-							--r;
-						left = std::min<size_t>(left, l);
-						right = std::max<size_t>(right, r);
-					}
-					halfGrid = (left + right) / 2;
-				}
-
-				/* invalidate the row rectangles as they depend on the orientation of the straightening
-				*	and apply the straightening until no more corners are found into the given direction */
-				for (StraightenRow& row : pStraightenRows)
-					row.tracked.rect = GridRect{};
-				while (fStraightenGrid(align, halfGrid));
-			}
-
-			/* perform a shrinking to ensure irrelevant rows opened by the
-			*	straightening do not strain the remainder of the algorithm */
-			fShrinkVertical();
-		}
-		bool fBuildFixInterlocks(ascg::IterationStop auto&& stopIteration) {
-			/* collect the current best grid state as basis for interlock fixing and
-			*	cache the best state to be able to recover it on worse performances */
-			detail::GridState bestGrid = pGrid;
-			GridScore bestScore = fMeasureGrid();
-			bool stopped = false;
-
-			/* alternate the fix direction until a pass yields no improvement
-			*	(at least one pass per direction) or the stop has been requested */
-			for (size_t i = 0; !stopped; ++i) {
-				bool dirty = false, leftwards = (i % 2 == 0);
-
-				/* forward-iterate the interlock fixing into the given
-				*	direction until one results in a positive outcome */
-				GridPoint point{};
-				size_t fixInterlockHash = 0;
-				while (!(stopped = stopIteration()) && fFixInterlocks(leftwards, point, fixInterlockHash)) {
-					/* first straighten the graph into the given direction, in order for any fix-changes
-					*	to propagate properly, and then perform a general straightening and shrinking */
-					fBuildStraighten(leftwards);
-
-					/* advance the point and check if a new best grid has been reached and reset the state accordingly (if the
-					*	fix worsens the grid, preserve the interlock-identification to prevent repeated fixing; keep the new
-					*	state, if the results do not change, as the interlock fixing may allow for future fixes to be applied) */
-					++point.x;
-					if (intptr_t cmp = fApplyBestGrid(bestGrid, bestScore); cmp > 0)
-						point = { .x = 0, .y = 0 }, dirty = true;
-					else if (cmp < 0)
-						pFailedFixes.insert(fixInterlockHash);
-				}
-
-				/* check if the fixing results in changes, in which
-				*	case fixes into the other direction can be repeated */
-				if (i > 0 && !dirty)
+			/* count the number of empty columns on the side shifted into */
+			for (bool blocked = false; emptyColumns < distance; ++emptyColumns) {
+				size_t column = (leftwards ? emptyColumns : edge - emptyColumns);
+				for (size_t y = yFirst; y <= yLast && !blocked; ++y)
+					blocked = !pGrid[y][column].isEmpty();
+				if (blocked)
 					break;
 			}
 
-			/* reset the grid to the best state (to capture minor best scores as well) */
-			std::swap(pGrid, bestGrid);
-			return !stopped;
+			/* check if the number of empty rows is too small and insert new null rows */
+			if (size_t missing = (distance - emptyColumns); missing > 0) {
+				fInsertEmptyColumns(leftwards, missing);
+				if (!leftwards)
+					edge += missing;
+			}
+
+			/* reconnect the previous rows with the to-be-shifted rows (may invalidate references) */
+			std::vector<Slot> slice(pGrid[yFirst].size(), Slot{});
+			if (yFirst > 0) {
+				detail::Row& prev = pGrid[yFirst - 1];
+				detail::Row& cur = pGrid[yFirst];
+
+				/* setup the moved target mapping (look at both neighbors to track transitions coming out
+				*	of nodes; the empty edge columns cannot be in use and will remain in place) */
+				for (size_t i = 0; i < cur.size(); ++i) {
+					bool used = (prev[i].anyBottom() || cur[i].anyTop());
+					slice[i] = Slot{ .target = (used ? detail::Towards(i, edge, distance) : i), .used = used, .top = false, .bottom = false };
+				}
+
+				/* relocate the arrow-heads, insert the shifting, patch the row positions accordingly, and check if the two rows
+				*	both contain nodes, in which case the shift could now allow them to touch and need an empty row inbetween */
+				fRelocateArrows(slice, prev, cur, false);
+				size_t yShifted = fInsertSliceCorrections(slice, yFirst, true);
+				yLast += (yShifted - yFirst), yFirst = yShifted;
+				if (fIsNodeRow(yFirst - 1) && fIsNodeRow(yFirst))
+					fInsertNullRow(yFirst++), ++yLast;
+			}
+
+			/* reconnect the last row to the next row, by letting all transitions
+			*	between them start at their shifted position (may invalidate references) */
+			if (yLast + 1 < pGrid.size()) {
+				detail::Row& cur = pGrid[yLast];
+				detail::Row& next = pGrid[yLast + 1];
+
+				/* setup the moved misplaced mapping (look at both neighbors to track transitions coming
+				*	out of nodes; the empty edge columns cannot be in use and will remain in place) */
+				slice.assign(slice.size(), Slot{});
+				for (size_t i = 0; i < cur.size(); ++i) {
+					if (cur[i].anyBottom() || next[i].anyTop())
+						slice[detail::Towards(i, edge, distance)] = Slot{ .target = i, .used = true, .top = false, .bottom = false };
+				}
+
+				/* relocate the arrow-heads, insert the shifting, and check if the two rows both contain nodes,
+				*	in which case the shift could now allow them to touch and need an empty row inbetween */
+				fRelocateArrows(slice, cur, next, true);
+				fInsertSliceCorrections(slice, yLast + 1, true);
+				if (fIsNodeRow(yLast) && fIsNodeRow(yLast + 1))
+					fInsertNullRow(yLast + 1);
+			}
+
+			/* shift the rows themselves into position (after the previous and upcoming
+			*	rows in order to ensure the slices can be constructed properly) */
+			size_t pivot = (leftwards ? distance : pGrid[yFirst].size() - distance);
+			for (size_t y = yFirst; y <= yLast; ++y) {
+				detail::Row& row = pGrid[y];
+				std::rotate(row.begin(), row.begin() + pivot, row.end());
+			}
+		}
+		bool fShiftChunks(detail::GridState& bestGrid, GridScore& bestScore, ascg::IterationStop auto&& stopIteration) {
+			std::vector<size_t> nodeMap;
+			bool improved = false;
+
+			/* helper to create the map of node index to row for the current grid
+			*	and to shift a single chunk and keep the result, if its better */
+			const auto setupNodeMap = [this, &nodeMap]() {
+				nodeMap.clear();
+				for (size_t y = 0; y < pGrid.size(); ++y) {
+					if (fIsNodeRow(y))
+						nodeMap.push_back(y);
+				}
+			};
+			const auto shiftChunk = [&](size_t first, size_t last, bool leftwards, size_t distance) -> std::pair<bool, bool> {
+				/* shift the rows themselves and straighten and compress the entire grid */
+				fShiftRows(nodeMap[first], nodeMap[last], leftwards, distance);
+				fFullStraighten(leftwards);
+				fCompressGrid();
+
+				/* check if a strictly better result has been found and update the node map */
+				bool neutral = (pGrid.size() <= bestScore.height);
+				if (fApplyBestGrid(bestGrid, bestScore, true) <= 0)
+					return{ neutral, false };
+				setupNodeMap();
+				return{ neutral, true };
+			};
+
+			/* reset the current grid to the best grid (to ensure equivalent scenarios) and setup the current node map */
+			pGrid = bestGrid;
+			setupNodeMap();
+
+			/* repeat the shifting until no chunk improves the grid anymore, as every kept shift may allow for further
+			*	shifts (must terminate, as another iteration is only started after a strict score improvement) */
+			std::vector<size_t> leftNeutral(nodeMap.size(), 0), rightNeutral(nodeMap.size(), 0);
+			for (bool dirty = true; dirty;) {
+				dirty = false;
+
+				/* try to shift each chunk (from one node up to the end) into each direction, by the distance most transitions
+				*	to the previous node benefit from, and track it, if it did not worsen the height (keep the best grid results) */
+				for (size_t first = 1; first < nodeMap.size(); ++first) {
+					for (bool leftwards : { true, false }) {
+						if (stopIteration())
+							return improved;
+
+						/* compute the preferred distance, try to shift the chunk, and record the result */
+						size_t distance = fFindShiftDistance(nodeMap[first - 1], nodeMap[first], leftwards);
+						const auto [neutral, changed] = shiftChunk(first, nodeMap.size() - 1, leftwards, distance);
+						(leftwards ? leftNeutral : rightNeutral)[first] = (neutral ? distance : 0);
+						if (changed)
+							dirty = true, improved = true;
+					}
+				}
+
+				/* iterate over the nodes again and shift every chunk for which the corresponding edge conditions (before the first, after the
+				*	last) were neutral shifts by the same distance (reduces the number of tested chunks while resulting in similar results) */
+				for (size_t first = 1; first < nodeMap.size(); ++first) {
+					for (size_t last = first; last + 1 < nodeMap.size(); ++last) {
+						for (bool leftwards : { true, false }) {
+							size_t distance = (leftwards ? leftNeutral : rightNeutral)[first];
+							if (distance == 0 || distance != (leftwards ? rightNeutral : leftNeutral)[last + 1])
+								continue;
+
+							/* the previous edge moves were neutral, try to move the entire chunk inbetween again */
+							if (stopIteration())
+								return improved;
+							if (shiftChunk(first, last, leftwards, distance).second)
+								dirty = true, improved = true;
+						}
+					}
+				}
+			}
+			return improved;
 		}
 
 	public:
@@ -1932,24 +2116,24 @@ namespace ascg::detail {
 			if (pLayers.layers.empty())
 				return {};
 			fConstructGrid();
-			fBuildStraighten(true);
+			fFullStraighten(true);
 
 			/* setup the currently best grid version (to be able to recover to it in case of worse visited graphs) */
 			detail::GridState bestGrid = pGrid;
 			GridScore bestScore = fMeasureGrid();
 
-			/* iterate until no more nodes need to be shifted or the stop has been requested */
+			/* iterate until no more nodes or chunks need to be shifted or the stop has been requested */
 			std::optional<ShiftTarget> nodeCurrent;
 			std::map<NodePoint, intptr_t> nodeOpen;
 			std::set<NodePoint> nodeClosed;
-			while (true) {
+			for (bool chunksShifted = false;;) {
 				/* fix any encountered interlocks (will automatically straighten the graph) and compress the grid, as the
 				*	fixes leave rows behind which only the strand removal can collapse and which would skew the score */
-				bool proceed = fBuildFixInterlocks(stopIteration);
+				bool proceed = fFullFixInterlocks(stopIteration);
 				fCompressGrid();
 
 				/* check if a new best graph has been encountered and reset all corresponding state */
-				if (!nodeCurrent.has_value() && fApplyBestGrid(bestGrid, bestScore) > 0)
+				if (!nodeCurrent.has_value() && fApplyBestGrid(bestGrid, bestScore, false) > 0)
 					nodeOpen.clear(), nodeClosed.clear(), nodeCurrent = std::nullopt;
 
 				/* check if the stop has been requested while fixing the interlocks,
@@ -1959,9 +2143,16 @@ namespace ascg::detail {
 
 				/* try to shift another node into a better place, in which
 				*	case the straightening and measuring can be repeated */
-				if (!fShiftNode(nodeOpen, nodeClosed, nodeCurrent))
+				if (fShiftNode(nodeOpen, nodeClosed, nodeCurrent)) {
+					fFullStraighten(true);
+					continue;
+				}
+
+				/* finally try to shift entire chunks of nodes of the best
+				*	grid, in which case the grid is optimized one more time */
+				if (chunksShifted || !fShiftChunks(bestGrid, bestScore, stopIteration))
 					break;
-				fBuildStraighten(true);
+				nodeOpen.clear(), nodeClosed.clear(), chunksShifted = true;
 			}
 
 			/* return the complete generated grid (use the best state to capture minor best scores as well) */
