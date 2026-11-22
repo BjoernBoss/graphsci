@@ -173,10 +173,6 @@ namespace ascg::detail {
 				return (x < r.x);
 			}
 		};
-		struct ShiftTarget {
-			NodePoint point;
-			size_t distance = 0;
-		};
 		struct GridPoint {
 			size_t x = 0;
 			size_t y = 0;
@@ -343,8 +339,8 @@ namespace ascg::detail {
 		size_t fInsertRotation(std::vector<Slot>& slice, size_t begin, size_t end, size_t target, size_t where) {
 			/* add the rotation of the range [begin, end) with begin finally being placed at target */
 			if (begin == target) return where;
+			size_t distance = detail::Distance(begin, target);
 			bool leftwards = (target < begin);
-			size_t distance = (leftwards ? (begin - target) : (target - begin));
 
 			/* iterate until no more entries need to be moved */
 			while (begin != end) {
@@ -1192,7 +1188,7 @@ namespace ascg::detail {
 			/* ensure an empty space exists on the other side of the corner to bend around (caller
 			*	must guarantee that the corner does not point into the empty spot to prevent invalid graphs)
 			*	and afterwards duplicate the line before and after to ensure three consecutive empty spots */
-			auto [xEmpty, yEmpty] = fCreateEmptyCell((leftwards ? xCorner - 1 : xCorner + 1), yCorner, leftwards);
+			auto [xEmpty, yEmpty] = fCreateEmptyCell(detail::Directional(xCorner, leftwards), yCorner, leftwards);
 			fInsertNullRow(yEmpty++);
 			fInsertNullRow(yEmpty + 1);
 
@@ -1200,12 +1196,12 @@ namespace ascg::detail {
 			pGrid[yEmpty - 1][xEmpty].kind = (leftwards ? detail::CellKind::rightBottom : detail::CellKind::leftBottom);
 			pGrid[yEmpty][xEmpty].kind = pGrid[yEmpty][xEmpty].addVertical();
 			pGrid[yEmpty + 1][xEmpty].kind = (leftwards ? detail::CellKind::rightTop : detail::CellKind::leftTop);
-			xEmpty = (leftwards ? xEmpty + 1 : xEmpty - 1);
+			xEmpty = detail::Directional(xEmpty, !leftwards);
 
 			/* insert the horizontal connections for the old transition to connect to the new detour */
 			pGrid[yEmpty - 1][xEmpty].kind = pGrid[yEmpty - 1][xEmpty].addHorizontal();
 			pGrid[yEmpty + 1][xEmpty].kind = pGrid[yEmpty + 1][xEmpty].addHorizontal();
-			xEmpty = (leftwards ? xEmpty + 1 : xEmpty - 1);
+			xEmpty = detail::Directional(xEmpty, !leftwards);
 
 			/* patch the original transition to connect to the detour */
 			pGrid[yEmpty - 1][xEmpty].kind = (leftwards ? detail::CellKind::leftTop : detail::CellKind::rightTop);
@@ -1302,7 +1298,7 @@ namespace ascg::detail {
 			/* insert the intermediate column */
 			xSpacer = detail::Towards(xSpacer, limit);
 			pGrid[yCrossing][xSpacer].kind = pGrid[yCrossing][xSpacer].addHorizontal();
-			pGrid[yDetour][xSpacer].kind = pGrid[yCrossing][xSpacer].addHorizontal();
+			pGrid[yDetour][xSpacer].kind = pGrid[yDetour][xSpacer].addHorizontal();
 
 			/* insert the final column, which connects the detour to the base row */
 			xSpacer = detail::Towards(xSpacer, limit);
@@ -1836,7 +1832,7 @@ namespace ascg::detail {
 
 				/* check if the distance is more frequent than the current
 				*	best distance and update it (prefer the shorter distances) */
-				size_t distance = (leftwards ? xHead - x : x - xHead);
+				size_t distance = detail::Distance(x, xHead);
 				if (++counts[distance] > counts[best] || (counts[distance] == counts[best] && distance < best))
 					best = distance;
 			}
@@ -1844,7 +1840,7 @@ namespace ascg::detail {
 			/* select the most frequent shift distance (default to 1 if none could be determined) */
 			return (best == 0 ? 1 : best);
 		}
-		bool fShiftNode(std::map<NodePoint, intptr_t>& open, std::set<NodePoint>& closed, std::optional<ShiftTarget>& current) {
+		bool fShiftNode(std::map<NodePoint, intptr_t>& open, std::set<NodePoint>& closed) {
 			/* node placement is identified by its index and first cell position, as for each grid, the
 			*	rows may be slightly shifted, but the overall starting horizontal position can be expected
 			*	to be consistent, as any shifts in it are assumed to also invalidate the grid score */
@@ -1906,25 +1902,16 @@ namespace ascg::detail {
 				leftwards = (pt.x < first);
 
 				/* compute the points distance to its target and the next spot to mark as empty to move into the given direction */
-				distance = (leftwards ? first - pt.x : pt.x - first);
+				distance = detail::Distance(first, pt.x);
 				emptySlot = (leftwards ? last : first);
 				return true;
 			};
 
-			/* check if a previous far away goal still exists and check if its still a relevant target, in which case it automatically
-			*	becomes the best choice (must have come closer as the iteration may otherwise move the grid over and result in a loop) */
+			/* find the next entry in the open list to apply */
 			size_t bestDistance = 0, bestEmptySlot = 0;
 			bool bestLeftwards = false;
 			auto best = open.end();
-			if (current.has_value()) {
-				if (evaluatePoint(current->point, bestDistance, bestEmptySlot, bestLeftwards) && bestDistance < current->distance)
-					best = open.find(current->point);
-				else
-					open.erase(current->point);
-			}
-
-			/* if no target to follow exists, find the next entry in the open list to apply */
-			if (best == open.end()) for (auto it = open.begin(); it != open.end();) {
+			for (auto it = open.begin(); it != open.end();) {
 				/* check if the entry has already been visited */
 				if (closed.contains(it->first)) {
 					it = open.erase(it);
@@ -1944,17 +1931,18 @@ namespace ascg::detail {
 			}
 
 			/* check if no next move has been found in which case the end has been reached */
-			current = std::nullopt;
 			if (best == open.end())
 				return false;
 
-			/* move the node over by ensuring that the spot next to it becomes empty and update the iterative state */
-			size_t yEmpty = fCreateEmptyCell(bestEmptySlot, nodeMap[best->first.index], bestLeftwards).second;
+			/* move the node over by ensuring that the spot next to it becomes empty and update the iterative state (older further
+			*	away targets are moved the entire distance at once, as single steps might result in unnecssary adjustments) */
+			size_t yEmpty = nodeMap[best->first.index];
+			for (size_t i = 0; i < bestDistance; ++i) {
+				const auto [x, y] = fCreateEmptyCell(bestEmptySlot, yEmpty, bestLeftwards);
+				bestEmptySlot = detail::Directional(x, bestLeftwards), yEmpty = y;
+			}
 			closed.insert(best->first);
-			if (bestDistance == 1)
-				open.erase(best);
-			else
-				current = ShiftTarget{ .point = best->first, .distance = bestDistance };
+			open.erase(best);
 
 			/* check if the previous or upcoming row also contains nodes (due to nodes with few
 			*	or no transitions being moved), in which case padding rows need to be inserted */
@@ -2088,20 +2076,23 @@ namespace ascg::detail {
 					}
 				}
 
-				/* iterate over the nodes again and shift every chunk for which the corresponding edge conditions (before the first, after the
-				*	last) were neutral shifts by the same distance (reduces the number of tested chunks while resulting in similar results) */
+				/* iterate over the nodes again and shift every chunk for which the corresponding edge conditions (before the first, after the last) were
+				*	both neutral shifts (reduces the number of tested chunks while resulting in similar results; try both if the two distances differ) */
 				for (size_t first = 1; first < nodeMap.size(); ++first) {
 					for (size_t last = first; last + 1 < nodeMap.size(); ++last) {
 						for (bool leftwards : { true, false }) {
-							size_t distance = (leftwards ? leftNeutral : rightNeutral)[first];
-							if (distance == 0 || distance != (leftwards ? rightNeutral : leftNeutral)[last + 1])
+							size_t fDistance = (leftwards ? leftNeutral : rightNeutral)[first];
+							size_t lDistance = (leftwards ? rightNeutral : leftNeutral)[last + 1];
+							if (fDistance == 0 || lDistance == 0)
 								continue;
 
 							/* the previous edge moves were neutral, try to move the entire chunk inbetween again */
-							if (stopIteration())
-								return improved;
-							if (shiftChunk(first, last, leftwards, distance).second)
-								dirty = true, improved = true;
+							for (size_t i = (fDistance == lDistance ? 1 : 0); i < 2; ++i) {
+								if (stopIteration())
+									return improved;
+								if (shiftChunk(first, last, leftwards, (i == 0 ? fDistance : lDistance)).second)
+									dirty = true, improved = true;
+							}
 						}
 					}
 				}
@@ -2123,7 +2114,6 @@ namespace ascg::detail {
 			GridScore bestScore = fMeasureGrid();
 
 			/* iterate until no more nodes or chunks need to be shifted or the stop has been requested */
-			std::optional<ShiftTarget> nodeCurrent;
 			std::map<NodePoint, intptr_t> nodeOpen;
 			std::set<NodePoint> nodeClosed;
 			for (bool chunksShifted = false;;) {
@@ -2133,8 +2123,8 @@ namespace ascg::detail {
 				fCompressGrid();
 
 				/* check if a new best graph has been encountered and reset all corresponding state */
-				if (!nodeCurrent.has_value() && fApplyBestGrid(bestGrid, bestScore, false) > 0)
-					nodeOpen.clear(), nodeClosed.clear(), nodeCurrent = std::nullopt;
+				if (fApplyBestGrid(bestGrid, bestScore, false) > 0)
+					nodeOpen.clear(), nodeClosed.clear();
 
 				/* check if the stop has been requested while fixing the interlocks,
 				*	in which case the current best grid can be returned */
@@ -2143,7 +2133,7 @@ namespace ascg::detail {
 
 				/* try to shift another node into a better place, in which
 				*	case the straightening and measuring can be repeated */
-				if (fShiftNode(nodeOpen, nodeClosed, nodeCurrent)) {
+				if (fShiftNode(nodeOpen, nodeClosed)) {
 					fFullStraighten(true);
 					continue;
 				}

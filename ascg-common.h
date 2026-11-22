@@ -57,6 +57,12 @@ namespace ascg {
 			if (a > b) std::swap(a, b);
 			return (value >= a && value <= b);
 		}
+		inline size_t Directional(size_t value, bool leftwards, size_t step = 1) {
+			return (leftwards ? value - step : value + step);
+		}
+		inline size_t Distance(size_t a, size_t b) {
+			return (a < b ? b - a : a - b);
+		}
 
 		struct Range {
 			size_t first = 0;
