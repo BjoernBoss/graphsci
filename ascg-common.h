@@ -18,6 +18,10 @@
 #include <unordered_map>
 #include <initializer_list>
 #include <concepts>
+#include <compare>
+#include <functional>
+#include <cmath>
+#include <bit>
 
 namespace ascg {
 	namespace detail {

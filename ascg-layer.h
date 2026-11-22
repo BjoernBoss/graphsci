@@ -18,10 +18,7 @@ namespace ascg::detail {
 
 	private:
 		static constexpr size_t fCapacity(size_t size) {
-			size_t capacity = 2;
-			while (capacity < size)
-				capacity <<= 1;
-			return capacity;
+			return std::bit_ceil(std::max<size_t>(size, 2));
 		}
 
 	public:
@@ -133,10 +130,10 @@ namespace ascg::detail {
 	struct Point {
 		std::variant<detail::Traverse, detail::Node> body;
 		const detail::Node* isNode() const {
-			return (std::holds_alternative<detail::Node>(body) ? &node() : nullptr);
+			return std::get_if<detail::Node>(&body);
 		}
 		const detail::Traverse* isTraverse() const {
-			return (std::holds_alternative<detail::Traverse>(body) ? &traverse() : nullptr);
+			return std::get_if<detail::Traverse>(&body);
 		}
 		const detail::Traverse& traverse() const {
 			return std::get<detail::Traverse>(body);
@@ -145,10 +142,10 @@ namespace ascg::detail {
 			return std::get<detail::Node>(body);
 		}
 		detail::Node* isNode() {
-			return (std::holds_alternative<detail::Node>(body) ? &node() : nullptr);
+			return std::get_if<detail::Node>(&body);
 		}
 		detail::Traverse* isTraverse() {
-			return (std::holds_alternative<detail::Traverse>(body) ? &traverse() : nullptr);
+			return std::get_if<detail::Traverse>(&body);
 		}
 		detail::Traverse& traverse() {
 			return std::get<detail::Traverse>(body);
@@ -192,20 +189,12 @@ namespace ascg::detail {
 		struct Strand {
 			size_t first = 0;
 			size_t last = 0;
-			bool operator<(const Strand& other) const {
-				if (first != other.first)
-					return (first < other.first);
-				return (last < other.last);
-			}
+			auto operator<=>(const Strand&) const = default;
 		};
 		struct Preferred {
 			float average = 0.0f;
 			size_t index = 0;
-			bool operator<(const Preferred& other) const {
-				if (average != other.average)
-					return (average < other.average);
-				return (index < other.index);
-			}
+			auto operator<=>(const Preferred&) const = default;
 		};
 		struct BuildEdge {
 			size_t first = 0;
@@ -228,24 +217,18 @@ namespace ascg::detail {
 
 	private:
 		void fUpdatePrevPoint(detail::Point& point, size_t edge, size_t to) const {
-			/* update the endpoint into the given direction to reference the new target */
+			/* update the endpoint into the given direction to reference the new target (the edge must exist in the node) */
 			if (detail::Traverse* traverse = point.isTraverse(); traverse != nullptr)
 				traverse->next = to;
-			else for (detail::Endpoint& ep : point.node().start) {
-				if (ep.edge != edge) continue;
-				ep.other = to;
-				break;
-			}
+			else
+				std::ranges::find(point.node().start, edge, &detail::Endpoint::edge)->other = to;
 		}
 		void fUpdateNextPoint(detail::Point& point, size_t edge, size_t to) const {
-			/* update the endpoint into the given direction to reference the new target */
+			/* update the endpoint into the given direction to reference the new target (the edge must exist in the node) */
 			if (detail::Traverse* traverse = point.isTraverse(); traverse != nullptr)
 				traverse->prev = to;
-			else for (detail::Endpoint& ep : point.node().end) {
-				if (ep.edge != edge) continue;
-				ep.other = to;
-				break;
-			}
+			else
+				std::ranges::find(point.node().end, edge, &detail::Endpoint::edge)->other = to;
 		}
 		void fMovePoint(detail::Point& point, size_t to, size_t index) {
 			/* notify the neighbors on the other layers of the point moving (the point itself is not updated) */
@@ -258,6 +241,22 @@ namespace ascg::detail {
 				fUpdatePrevPoint(pLayerGraph.layers[index - 1].points[ep.other], ep.edge, to);
 			for (detail::Endpoint& ep : point.node().start)
 				fUpdateNextPoint(pLayerGraph.layers[index + 1].points[ep.other], ep.edge, to);
+		}
+		void fShiftPoint(size_t index, size_t from, size_t to) {
+			detail::Points& points = pLayerGraph.layers[index].points;
+
+			/* move the point to the target position by swapping the neighbors
+			*	one-by-one to keep the references to neighbors valid */
+			while (from != to) {
+				size_t next = detail::Towards(from, to);
+				fMovePoint(points[from], next, index);
+				fMovePoint(points[next], from, index);
+				std::swap(points[from], points[next]);
+				from = next;
+			}
+		}
+		bool fIsEdgeTraversal(const detail::Point& point, size_t edge) const {
+			return (point.isTraverse() != nullptr && point.traverse().edge == edge);
 		}
 		size_t fFindNode(size_t index) const {
 			const detail::Points& points = pLayerGraph.layers[index].points;
@@ -345,31 +344,25 @@ namespace ascg::detail {
 		}
 
 	private:
+		size_t fGetMovedCrossings(size_t self, size_t other, size_t crossings) const {
+			if (other == self)
+				return crossings;
+			return (other < self ? crossings - 1 : crossings + 1);
+		}
 		void fSetupPaths(size_t edge, std::vector<StrandPath>& paths, size_t& actual) const {
 			const BuildEdge& buildEdge = pEdges[edge];
 			const detail::Points& prev = pLayerGraph.layers[buildEdge.first].points;
 			const detail::Points& next = pLayerGraph.layers[buildEdge.first + 1].points;
 
-			/* helper to compute the absolute and normalized drift and to determine if a
-			*	point is the current edge and to update the crossings count for a moved point */
+			/* helper to compute the absolute and normalized drift */
 			const auto getDrift = [&prev, &next](size_t iStart, size_t iNext) -> float {
 				float dPrev = (static_cast<float>(iStart) + 0.5f) / prev.size();
 				float dNext = static_cast<float>(iNext) / next.size();
-				return (dPrev < dNext ? (dNext - dPrev) : (dPrev - dNext));
-			};
-			const auto isCurrent = [edge](const detail::Point& point) -> bool {
-				return (point.isTraverse() != nullptr && point.traverse().edge == edge);
-			};
-			const auto getMoved = [](size_t self, size_t other, size_t crossings) -> size_t {
-				if (other == self)
-					return crossings;
-				return (other < self ? crossings - 1 : crossings + 1);
+				return std::abs(dNext - dPrev);
 			};
 
 			/* count the initial crossings from the left start to the edge-node */
-			size_t crossings = 0, start = 0;
-			while (prev[start].isTraverse() != nullptr)
-				++crossings, ++start;
+			size_t start = fFindNode(buildEdge.first), crossings = start;
 
 			/* initialize the list of paths */
 			paths.resize(next.size() + 1);
@@ -380,28 +373,25 @@ namespace ascg::detail {
 				/* check if the end has been reached and otherwise update the actual current crossings */
 				if (i >= next.size())
 					break;
-				if (isCurrent(next[i]))
+				if (fIsEdgeTraversal(next[i], edge))
 					actual += crossings;
 
 				/* update the crossing count to consider the right point skipped */
 				if (const detail::Node* node = next[i].isNode(); node != nullptr) for (const detail::Endpoint& ep : node->end)
-					crossings = getMoved(start, ep.other, crossings);
+					crossings = fGetMovedCrossings(start, ep.other, crossings);
 				else if (next[i].traverse().edge != edge)
-					crossings = getMoved(start, next[i].traverse().prev, crossings);
+					crossings = fGetMovedCrossings(start, next[i].traverse().prev, crossings);
 			}
 		}
 		void fAdvancePaths(size_t index, size_t edge, const std::vector<StrandPath>& current, std::vector<StrandPath>& paths, std::vector<size_t>& predecessors, size_t& actual) const {
 			const detail::Points& prev = pLayerGraph.layers[index].points;
 			const detail::Points& next = pLayerGraph.layers[index + 1].points;
 
-			/* helper to compute the absolute and normalized drift and to determine if a point is the current edge */
+			/* helper to compute the absolute and normalized drift */
 			const auto getDrift = [&prev, &next](size_t iPrev, size_t iNext) -> float {
 				float dPrev = static_cast<float>(iPrev) / prev.size();
 				float dNext = static_cast<float>(iNext) / next.size();
-				return (dPrev < dNext ? (dNext - dPrev) : (dPrev - dNext));
-			};
-			const auto isCurrent = [edge](const detail::Point& point) -> bool {
-				return (point.isTraverse() != nullptr && point.traverse().edge == edge);
+				return std::abs(dNext - dPrev);
 			};
 
 			/* initialize the crossings map, which maps prev-position to crossings
@@ -411,7 +401,7 @@ namespace ascg::detail {
 				if (const detail::Node* node = prev[i].isNode(); node != nullptr)
 					crossings[i + 1] = crossings[i] + node->start.size();
 				else
-					crossings[i + 1] = crossings[i] + (isCurrent(prev[i]) ? 0 : 1);
+					crossings[i + 1] = crossings[i] + (fIsEdgeTraversal(prev[i], edge) ? 0 : 1);
 			}
 
 			/* iterate over the potential new endpoint paths and find
@@ -439,7 +429,7 @@ namespace ascg::detail {
 				/* check if the end has been reached and otherwise update the actual current crossings */
 				if (i >= next.size())
 					break;
-				if (isCurrent(next[i]))
+				if (fIsEdgeTraversal(next[i], edge))
 					actual += crossings[next[i].traverse().prev];
 
 				/* iterate other the crossings and update them based on the moved point being pushed around */
@@ -461,26 +451,15 @@ namespace ascg::detail {
 			const detail::Points& prev = pLayerGraph.layers[buildEdge.last - 1].points;
 			const detail::Points& next = pLayerGraph.layers[buildEdge.last].points;
 
-			/* helper to compute the absolute and normalized drift and to determine if a
-			*	point is the current edge and to update the crossings count for a moved point */
+			/* helper to compute the absolute and normalized drift */
 			const auto getDrift = [&prev, &next](size_t iPrev, size_t iEnd) -> float {
 				float dPrev = static_cast<float>(iPrev) / prev.size();
 				float dNext = (static_cast<float>(iEnd) + 0.5f) / next.size();
-				return (dPrev < dNext ? (dNext - dPrev) : (dPrev - dNext));
-			};
-			const auto isCurrent = [edge](const detail::Point& point) -> bool {
-				return (point.isTraverse() != nullptr && point.traverse().edge == edge);
-			};
-			const auto getMoved = [](size_t self, size_t other, size_t crossings) -> size_t {
-				if (other == self)
-					return crossings;
-				return (other < self ? crossings - 1 : crossings + 1);
+				return std::abs(dNext - dPrev);
 			};
 
 			/* count the initial crossings from the left start to the edge-node */
-			size_t crossings = 0, end = 0;
-			while (next[end].isTraverse() != nullptr)
-				++crossings, ++end;
+			size_t end = fFindNode(buildEdge.last), crossings = end;
 
 			/* update each of the paths towards the target position and check if the best path has been found */
 			size_t best = 0;
@@ -497,14 +476,14 @@ namespace ascg::detail {
 				/* check if the end has been reached and otherwise update the actual current crossings */
 				if (i >= prev.size())
 					break;
-				if (isCurrent(prev[i]))
+				if (fIsEdgeTraversal(prev[i], edge))
 					actual += crossings;
 
 				/* update the crossing count to consider the right point skipped */
 				if (const detail::Node* node = prev[i].isNode(); node != nullptr) for (const detail::Endpoint& ep : node->start)
-					crossings = getMoved(end, ep.other, crossings);
+					crossings = fGetMovedCrossings(end, ep.other, crossings);
 				else if (prev[i].traverse().edge != edge)
-					crossings = getMoved(end, prev[i].traverse().next, crossings);
+					crossings = fGetMovedCrossings(end, prev[i].traverse().next, crossings);
 			}
 			return best;
 		}
@@ -571,9 +550,7 @@ namespace ascg::detail {
 			*	conflicts (longest first as they affect others most; ties and conflict-free strands go to the
 			*	right; stable_sort for consistent graph results independent on sorting algorithm) */
 			std::vector<int8_t> side(pEdges.size(), 0);
-			std::stable_sort(relevant.begin(), relevant.end(), [&edges = pEdges](size_t a, size_t b) {
-				return (edges[a].last - edges[a].first) > (edges[b].last - edges[b].first);
-			});
+			std::ranges::stable_sort(relevant, std::greater{}, [&edges = pEdges](size_t edge) { return (edges[edge].last - edges[edge].first); });
 			const auto getConflicts = [&overlap, &side](size_t edge) -> intptr_t {
 				intptr_t sum = 0;
 				for (size_t other : overlap[edge])
@@ -618,8 +595,8 @@ namespace ascg::detail {
 				}
 
 				/* sort the sides from outwards to inwards (i.e. by nesting level towards the node) */
-				std::sort(left.begin(), left.end(), sortByOuter);
-				std::sort(right.begin(), right.end(), [&sortByOuter](size_t a, size_t b) { return sortByOuter(b, a); });
+				std::ranges::sort(left, sortByOuter);
+				std::ranges::sort(right, [&sortByOuter](size_t a, size_t b) { return sortByOuter(b, a); });
 
 				/* construct the layer points themselves */
 				detail::Layer& layer = pLayerGraph.layers[i];
@@ -699,10 +676,7 @@ namespace ascg::detail {
 			/* sort the points by their preferred position (equal scores will preserve
 			*	their current position) and check if the layer changes at all */
 			std::sort(preferred.begin(), preferred.end());
-			bool changed = false;
-			for (size_t i = 0; i < preferred.size() && !changed; ++i)
-				changed = (preferred[i].index != i);
-			if (!changed)
+			if (std::ranges::is_sorted(preferred, {}, &Preferred::index))
 				return false;
 
 			/* construct the new layer based on the new indices */
@@ -744,15 +718,8 @@ namespace ascg::detail {
 					continue;
 				changed = true;
 
-				/* move the point to the target position by swapping the neighbors
-				*	one-by-one to keep the references to neighbors valid */
-				for (size_t j = i; j != bestIndex;) {
-					size_t next = detail::Towards(j, bestIndex);
-					fMovePoint(layer.points[j], next, index);
-					fMovePoint(layer.points[next], j, index);
-					std::swap(layer.points[j], layer.points[next]);
-					j = next;
-				}
+				/* move the point to the target position */
+				fShiftPoint(index, i, bestIndex);
 			}
 			return changed;
 		}
@@ -799,13 +766,7 @@ namespace ascg::detail {
 					bestIndex = predecessors[i - edge.first - 2][bestIndex];
 
 				/* move the point to the new position */
-				while (where != target) {
-					size_t next = detail::Towards(where, target);
-					fMovePoint(points[where], next, i);
-					fMovePoint(points[next], where, i);
-					std::swap(points[where], points[next]);
-					where = next;
-				}
+				fShiftPoint(i, where, target);
 			}
 			return true;
 		}
@@ -819,13 +780,7 @@ namespace ascg::detail {
 
 			/* preserve the current state (to revert worse graphs) and move the node to the edge */
 			std::vector<detail::Layer> layers = pLayerGraph.layers;
-			while (where != target) {
-				size_t next = detail::Towards(where, target);
-				fMovePoint(points[where], next, index);
-				fMovePoint(points[next], where, index);
-				std::swap(points[where], points[next]);
-				where = next;
-			}
+			fShiftPoint(index, where, target);
 
 			/* propagate the changes through by reordering the layers overall to include the new shifted node */
 			for (size_t i = index + 1; i < pLayerGraph.layers.size() && fReorderLayer(i, Direction::backwards); ++i);
@@ -998,9 +953,7 @@ namespace ascg::detail {
 			fResetLayers(fOptimizeLayers(), stopTest);
 
 			/* return the complete generated layers from the internal state */
-			detail::LayerState state;
-			std::swap(pLayerGraph, state);
-			return state;
+			return std::exchange(pLayerGraph, {});
 		}
 	};
 }
