@@ -898,8 +898,8 @@ namespace ascg::detail {
 			xEnd = xOther;
 			if (endIsNode) for (size_t i = xEnd; xEnd != x && pGrid[yOther][i].isNode(); i = detail::Towards(i, x))
 				xEnd = i;
-			else if (pGrid[yOther][xOther].kind != cell.kind) {
-				size_t limit = (xOther < x ? pGrid[y].size() : 0);
+			else if (x < xOther ? pGrid[yOther][xOther].cornerLeft() : pGrid[yOther][xOther].cornerRight()) {
+				size_t limit = (x < xOther ? 0 : pGrid[y].size());
 				while (pGrid[yOther][xEnd = detail::Towards(xEnd, limit)].lineHorizontal());
 
 				/* check if the other side is larger than the current horizontal, in which case the corner [x,y]
@@ -1138,11 +1138,12 @@ namespace ascg::detail {
 
 					/* patch all of the affected corners */
 					if (!endIsNode) {
+						detail::Cell moved = pGrid[yOther][xOther];
 						if (detail::Inbetween(target, xOther, xEnd))
-							pGrid[yOther][target].kind = (target == xEnd ? detail::CellKind::vertical : pGrid[y][x].mirrorVertical());
+							pGrid[yOther][target].kind = (target == xEnd ? detail::CellKind::vertical : moved.kind);
 						else {
 							pGrid[yOther][xEnd].kind = pGrid[yOther][xEnd].mirrorVertical();
-							pGrid[yOther][target].kind = pGrid[y][x].kind;
+							pGrid[yOther][target].kind = (xOther == xEnd ? moved.kind : moved.mirrorVertical());
 						}
 						pGrid[yOther][xOther].kind = (xOther == xEnd ? detail::CellKind::horizontal : detail::CellKind::empty);
 					}
