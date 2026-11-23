@@ -16,10 +16,12 @@ This library is a header only library. Simply clone the repository, and include 
 ## Library Usage
 
 The library supports edges between any two nodes, which can conditionally have arrow heads on the ends of edges. But there can at most be one edge between any two nodes.
+Node are implicitly defined by being used by edges, but they can also be explicitly created, should they, for example, not be part of any edges.
 
 The graphs are built edge-by-edge:
 ```C++
 ascg::Builder builder{};
+builder.node(2);
 builder.connect(0, 3);
 builder.connect(0, 4);
 builder.connect(0, 5, true, true);
@@ -48,34 +50,35 @@ The library comes with some predefined themes and theme builders:
                            - Rounded Corners       - Heavy Lines
                                                    - Heavy Nodes
 
-    #####              |    ■■■■■              |    █████
-    A | '---------,    |    ▲ │ ╰─────────╮    |    ▲ ┃ ┗━━━━━━━━━┓
-  ,-' | ,-,       |    |  ╭─╯ │ ╭─╮       │    |  ┏━┛ ┃ ┏━┓       ┃
-  |   | #######   |    |  │   │ ■■■■■■■   │    |  ┃   ┃ ███████   ┃
-  | ,-|-' | | '---|-,  |  │ ╭─│─╯ │ │ ╰───│─╮  |  ┃ ┏━┃━┛ ┃ ┃ ┗━━━┃━┓
-  | | |   | ###   | |  |  │ │ │   │ ■■■   │ │  |  ┃ ┃ ┃   ┃ ███   ┃ ┃
-  | | ##### | '-, | |  |  │ │ ■■■■■ │ ╰─╮ │ │  |  ┃ ┃ █████ ┃ ┗━┓ ┃ ┃
-  | | | A '-|-, V | |  |  │ │ │ ▲ ╰─│─╮ ▼ │ │  |  ┃ ┃ ┃ ▲ ┗━┃━┓ ▼ ┃ ┃
-  | | | | ,-' ##### |  |  │ │ │ │ ╭─╯ ■■■■■ │  |  ┃ ┃ ┃ ┃ ┏━┛ █████ ┃
-  V | | | |   A |   |  |  ▼ │ │ │ │   ▲ │   │  |  ▼ ┃ ┃ ┃ ┃   ▲ ┃   ┃
-  ##### | |   '-'   |  |  ■■■■■ │ │   ╰─╯   │  |  █████ ┃ ┃   ┗━┛   ┃
-      | | | ,-------'  |      │ │ │ ╭───────╯  |      ┃ ┃ ┃ ┏━━━━━━━┛
-      #######          |      ■■■■■■■          |      ███████
+              #####    |              ■■■■■    |              █████
+  ,-----------' | A    |  ╭───────────╯ │ ▲    |  ┏━━━━━━━━━━━┛ ┃ ▲
+  |     ,-,     | '-,  |  │     ╭─╮     │ ╰─╮  |  ┃     ┏━┓     ┃ ┗━┓
+  |     ####### |   |  |  │     ■■■■■■■ │   │  |  ┃     ███████ ┃   ┃
+  |     | | | '-|-, |  |  │     │ │ │ ╰─│─╮ │  |  ┃     ┃ ┃ ┃ ┗━┃━┓ ┃
+  |   ### | |   | | |  |  │   ■■■ │ │   │ │ │  |  ┃   ███ ┃ ┃   ┃ ┃ ┃
+  | ,-' | | ##### | |  |  │ ╭─╯ │ │ ■■■■■ │ │  |  ┃ ┏━┛ ┃ ┃ █████ ┃ ┃
+  | V ,-|-|-' A | | |  |  │ ▼ ╭─│─│─╯ ▲ │ │ │  |  ┃ ▼ ┏━┃━┃━┛ ▲ ┃ ┃ ┃
+  ##### | |   | | | V  |  ■■■■■ │ │   │ │ │ ▼  |  █████ ┃ ┃   ┃ ┃ ┃ ▼
+  A |   | '-, | #####  |  ▲ │   │ ╰─╮ │ ■■■■■  |  ▲ ┃   ┃ ┗━┓ ┃ █████
+  '-'   '-, | | |      |  ╰─╯   ╰─╮ │ │ │      |  ┗━┛   ┗━┓ ┃ ┃ ┃
+          #######      |          ■■■■■■■      |          ███████
 ```
 
 The `ascg::AsciiTheme` is the default theme. Besides, there exists the `ascg::ExtendedTheme`, which renders the graph to the `CP437`. Finally, the `ascg::UnicodeTheme` method allows to build various different styles based on unicode characters.
 
 ## Algorithm Performance
 
-The algorithms do not guarantee to select the perfect ordering of the edges. Rather, they strive for a best-effort solution. 
+The algorithms do not guarantee to select the perfect ordering of the edges. Rather, they strive for a best-effort solution.
 
 Given that the rendering and visual complexity reduction can become quite time intensive, the `finalize` method also takes a stop-callback. The algorithm will continue optimization until a stable end has been reached, or until the stop-callback returns true, in which case the currently best representation will be returned.
 
 ```C++
-/* ensure that the graph runs at most two seconds */
+/* ensure that the graph runs at most two seconds (35% for layout, 65% for render) */
 auto start = std::chrono::high_resolution_clock::now();
-const auto graph = builder.finalize([start] { 
+const auto graph = builder.finalize([start] (auto phase) {
 	auto elapsed = (std::chrono::high_resolution_clock::now() - start);
+	if (phase == ascg::Phase::layout)
+		return elapsed >= std::chrono::seconds(2) * 0.35;
 	return elapsed >= std::chrono::seconds(2);
 });
 ```
@@ -84,37 +87,39 @@ const auto graph = builder.finalize([start] {
 
 The following example show a K10 graph without self-loops, and the default `ascg::UnicodeTheme`:
 ```
-                  ■■■■■■■■■■■■■■■■■
-        ┌─────────┘ │ │ │ │ │ │ │ └───────────────────┐
-┌───────│───────────┘ │ │ │ │ │ └───────────────────┐ │
-│       │       ┌─────┘ │ │ │ └───────────────────┐ │ │
-│       │       │       │ │ └───────────────┐     │ │ │
-│       │       │       │ ■■■■■■■■■■■■■■■   │     │ │ │
-│ ┌─────│───────│───────│─┘ │ │ │ │ │ │ │   │     │ │ │
-│ │     │ ┌─────│───────│───┘ │ │ │ │ │ └───│───┐ │ │ │
-│ │     │ │     │ ┌─────│─────┘ │ │ │ └───┐ │   │ │ │ │
-│ │     │ │     │ │ ■■■■■■■■■■■■■ │ │     │ │   │ │ │ │
-│ │ ┌───│─│─────│─│─┘ │ │ │ │ │ └─│─│─────│─│─┐ │ │ │ │
-│ │ │   │ │ ┌───│─│───┘ │ │ │ └───│─│───┐ │ │ │ │ │ │ │
-│ │ │   │ │ │ ■■■■■■■■■■■ │ └───┐ │ │   │ │ │ │ │ │ │ │
-│ │ │ ┌─│─│─│─┘ │ │ │ │ └─│─────│─│─│─┐ │ │ │ │ │ │ │ │
-│ │ │ │ ■■■■■■■■■ │ │ └───│───┐ │ │ │ │ │ │ │ │ │ │ │ │
-│ │ │ │ │ │ │ │ │ │ └─────│─┐ │ │ │ │ │ │ │ │ │ │ │ │ │
-■■■■■■■■■ │ │ │ │ └─┐ ┌───┘ │ │ │ │ │ │ │ │ │ │ │ │ │ │
-  │ │ │ │ │ │ │ └─┐ │ │ ┌───│─│─│─┘ │ │ │ │ │ │ │ │ │ │
-  │ │ │ └─│─│─│─┐ │ │ │ │ ┌─│─│─│───│─│─│─│─┘ │ │ │ │ │
-  │ │ │   │ │ │ ■■■■■■■■■■■ │ │ │ ┌─┘ │ │ │   │ │ │ │ │
-  │ │ │   │ │ │ │   │ ┌───│─┘ │ │ │ ┌─│─│─│───│─│─┘ │ │
-  │ │ │   │ │ │ │   │ │   └─┐ │ │ │ │ │ │ │   │ │   │ │
-  │ │ │   │ │ └─│───│─│───┐ │ │ │ │ │ │ │ │   │ │   │ │
-  │ │ └───│─│───│───│─│─┐ │ │ │ │ │ │ │ │ │   │ │   │ │
-  │ │     │ │   │   │ │ ■■■■■■■■■■■■■ │ │ │   │ │   │ │
-  │ │     │ └───│─┐ │ │ │ ┌─────│─────│─┘ │   │ │   │ │
-  │ │     │   ┌─┘ │ │ │ │ │ ┌───│─────│───┘   │ │   │ │
-  │ └─────│───│─┐ │ │ │ │ │ │ ┌─│─────│───────│─│───┘ │
-  │       │   │ ■■■■■■■■■■■■■■■ │ ┌───┘       │ │     │
-  │       │   └─────────────┐ │ │ │ ┌─────────┘ │     │
-  │       └───────────────┐ │ │ │ │ │ ┌─────────┘     │
-  └─────────────────────┐ │ │ │ │ │ │ │ ┌─────────────┘
-                        ■■■■■■■■■■■■■■■■■
+                          ■■■■■■■■■■■■■■■■■
+      ┌───────────────────┘ │ │ │ │ │ │ │ └─────────┐
+      │       ┌─────────────┘ │ │ │ │ │ └─────────┐ │
+      │       │               │ │ │ │ └─────────┐ │ │
+      │       │               │ │ │ └─────┐     │ │ │
+      │       │ ■■■■■■■■■■■■■■■ │ └─┐     │     │ │ │
+┌─────│───────│─┘ │ │ │ │ │ │ └─│───│─────│─┐   │ │ │
+│ ┌───│───────│───┘ │ │ │ │ └───│───│───┐ │ │   │ │ │
+│ │   │       │     │ │ │ └─────│─┐ │   │ │ │   │ │ │
+│ │   │ ■■■■■■■■■■■■■ │ └─┐ ┌───┘ │ │   │ │ │   │ │ │
+│ │ ┌─│─┘ │ │ │ │ │ └─│───│─│─────│─│─┐ │ │ │   │ │ │
+│ │ │ │ ┌─┘ │ │ │ └───│───│─│───┐ │ │ │ │ │ │   │ │ │
+│ │ │ │ │ ┌─┘ │ └─────│─┐ │ │   │ │ │ │ │ │ │   │ │ │
+│ │ │ └─│─│─┐ │       │ │ │ │   │ │ │ │ │ │ │   │ │ │
+│ │ │   │ │ ■■■■■■■■■■■ │ │ │   │ │ │ │ │ │ │   │ │ │
+│ │ │ ┌─│─│─┘ │ │ │ │ └─│─│─│─┐ │ │ │ │ │ │ │   │ │ │
+│ │ │ │ │ │   │ │ │ ■■■■■■■■■ │ │ │ │ │ │ │ │   │ │ │
+│ │ │ │ │ │ ┌─│─│─│─┘ │ │ │ │ │ │ │ │ │ │ │ │   │ │ │
+│ │ │ │ │ │ │ │ │ │ ┌─┘ │ │ ■■■■■■■■■ │ │ │ │   │ │ │
+│ │ │ │ │ │ │ │ │ │ │   │ │ │ │   │ └─│─│─│─│─┐ │ │ │
+│ │ │ │ │ │ │ │ │ │ │ ┌─│─│─┘ │   └─┐ │ │ │ │ │ │ │ │
+│ │ │ │ │ │ │ │ │ │ │ │ │ └───│───┐ │ │ │ │ │ │ │ │ │
+│ │ │ │ │ │ │ │ │ └─│─│─│─────│─┐ │ │ │ │ │ │ │ │ │ │
+│ │ │ │ │ │ │ │ │   │ │ └───┐ │ ■■■■■■■■■■■ │ │ │ │ │
+│ │ │ │ │ │ │ │ └───│─│───┐ │ │ │ ┌───│─│───┘ │ │ │ │
+│ │ │ │ │ └─│─│─────│─│─┐ │ │ │ │ │ ┌─│─│─────│─┘ │ │
+│ │ │ │ │   │ └───┐ │ │ ■■■■■■■■■■■■■ │ │     │   │ │
+│ │ │ │ └───│───┐ │ │ │ │ ┌───│───────┘ │     │   │ │
+│ └─│─│─────│─┐ │ │ │ │ │ │ ┌─│─────────│─────│───┘ │
+│   │ │     │ ■■■■■■■■■■■■■■■ │ ┌───────┘     │     │
+│   │ │     └─────────────┐ │ │ │ ┌───────────┘     │
+│   │ └─────────────────┐ │ │ │ │ │ ┌───────────────┘
+│   └─────────────────┐ │ │ │ │ │ │ │
+└───────────────────┐ │ │ │ │ │ │ │ │
+                    ■■■■■■■■■■■■■■■■■
 ```

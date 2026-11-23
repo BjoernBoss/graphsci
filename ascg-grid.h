@@ -1825,7 +1825,7 @@ namespace ascg::detail {
 			*	straightening do not strain the remainder of the algorithm */
 			fShrinkVertical();
 		}
-		bool fFullFixInterlocks(ascg::IterationStop auto&& stopIteration) {
+		bool fFullFixInterlocks(ascg::IterationStop auto&& stopTest) {
 			/* collect the current best grid state as basis for interlock fixing and
 			*	cache the best state to be able to recover it on worse performances */
 			detail::GridState bestGrid = pGrid;
@@ -1841,7 +1841,7 @@ namespace ascg::detail {
 				*	direction until one results in a positive outcome */
 				GridPoint point{};
 				size_t fixInterlockHash = 0;
-				while (!(stopped = stopIteration()) && fFixInterlocks(leftwards, point, fixInterlockHash)) {
+				while (!(stopped = stopTest(ascg::Phase::render)) && fFixInterlocks(leftwards, point, fixInterlockHash)) {
 					/* first straighten the graph into the given direction, in order for any fix-changes
 					*	to propagate properly, and then perform a general straightening and shrinking */
 					fFullStraighten(leftwards);
@@ -2117,7 +2117,7 @@ namespace ascg::detail {
 				std::rotate(row.begin(), row.begin() + pivot, row.end());
 			}
 		}
-		bool fShiftChunks(detail::GridState& bestGrid, GridScore& bestScore, ascg::IterationStop auto&& stopIteration) {
+		bool fShiftChunks(detail::GridState& bestGrid, GridScore& bestScore, ascg::IterationStop auto&& stopTest) {
 			std::vector<size_t> nodeMap;
 			bool improved = false;
 
@@ -2150,7 +2150,7 @@ namespace ascg::detail {
 				*	to the previous node benefit from, and track it, if it did not worsen the height (keep the best grid results) */
 				for (size_t first = 1; first < nodeMap.size(); ++first) {
 					for (bool leftwards : { true, false }) {
-						if (stopIteration())
+						if (stopTest(ascg::Phase::render))
 							return improved;
 
 						/* compute the preferred distance, try to shift the chunk, and record the result */
@@ -2174,7 +2174,7 @@ namespace ascg::detail {
 
 							/* the previous edge moves were neutral, try to move the entire chunk inbetween again */
 							for (size_t i = (fDistance == lDistance ? 1 : 0); i < 2; ++i) {
-								if (stopIteration())
+								if (stopTest(ascg::Phase::render))
 									return improved;
 								if (shiftChunk(first, last, leftwards, (i == 0 ? fDistance : lDistance)).second)
 									dirty = true, improved = true;
@@ -2187,7 +2187,7 @@ namespace ascg::detail {
 		}
 
 	public:
-		detail::GridState build(ascg::IterationStop auto&& stopIteration) {
+		detail::GridState build(ascg::IterationStop auto&& stopTest) {
 			/* check if the layers are empty, in which case nothing needs to be done, and
 			*	otherwise create the initial grid and straighten it (cannot be empty anymore) */
 			if (pLayers.layers.empty())
@@ -2205,7 +2205,7 @@ namespace ascg::detail {
 			for (bool chunksShifted = false;;) {
 				/* fix any encountered interlocks (will automatically straighten the graph) and compress the grid, as the
 				*	fixes leave rows behind which only the strand removal can collapse and which would skew the score */
-				bool proceed = fFullFixInterlocks(stopIteration);
+				bool proceed = fFullFixInterlocks(stopTest);
 				fCompressVertical();
 
 				/* check if a new best graph has been encountered and reset all corresponding state */
@@ -2226,7 +2226,7 @@ namespace ascg::detail {
 
 				/* finally try to shift entire chunks of nodes of the best
 				*	grid, in which case the grid is optimized one more time */
-				if (chunksShifted || !fShiftChunks(bestGrid, bestScore, stopIteration))
+				if (chunksShifted || !fShiftChunks(bestGrid, bestScore, stopTest))
 					break;
 				nodeOpen.clear(), nodeClosed.clear(), chunksShifted = true;
 			}

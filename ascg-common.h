@@ -91,10 +91,21 @@ namespace ascg {
 		};
 	}
 
+	/*
+	*	The phases of the graph builder. The graph will always go
+	*	through both phases, and each of them can be stopped separately.
+	*
+	*	The time should be divided as: 35% layout, 65% render.
+	*/
+	enum class Phase : uint8_t {
+		layout,
+		render
+	};
+
 	/* callable queried between the optimization iterations, returning true
-	*	stops the execution and the best result found so far is returned */
+	*	stops the current phase and the best result found so far is returned */
 	template <class Type>
-	concept IterationStop = std::predicate<Type>;
+	concept IterationStop = std::predicate<Type, ascg::Phase>;
 
 	/* map entry for graph map from row to node */
 	struct MapEntry {

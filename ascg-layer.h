@@ -932,7 +932,7 @@ namespace ascg::detail {
 
 				/* try each direction and check if the layout has improved */
 				for (size_t dir = 0; dir < 2; ++dir) {
-					if (stopTest())
+					if (stopTest(ascg::Phase::layout))
 						return;
 					if (fResetLayer(layer, (dir == 0), bestCrossings))
 						stamina = 0, dir = 2;

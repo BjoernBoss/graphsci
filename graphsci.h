@@ -34,7 +34,7 @@ namespace ascg {
 			pNodes.insert(b);
 		}
 		ascg::Graph finalize(const ascg::Theme& theme = ascg::AsciiTheme) const {
-			return fFinalize([] { return false; }, theme);
+			return fFinalize([] (ascg::Phase) { return false; }, theme);
 		}
 		ascg::Graph finalize(ascg::IterationStop auto&& stopTest, const ascg::Theme& theme = ascg::AsciiTheme) const {
 			return fFinalize(stopTest, theme);
