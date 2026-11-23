@@ -135,11 +135,13 @@ namespace ascg::detail {
 	*		it and remember the failed interlock), compress the grid, and shift nodes sideways to unblock further straightenings
 	*	3.	once no node can be shifted anymore, shift whole chunks of neighboring nodes sideways, and keep every shift,
 	*		which strictly improves the score, until no chunk improves the grid anymore, and repeat 2. once more
+	*	4.	compress the final grid horizontally by removing strands of unused cells
 	*	All loops are bounded: a straightening step strictly shortens a transition, the fix scan only restarts on strict
 	*	score improvements, failed fixes are not retried, every node shift is tried at most once per best grid, and the chunks
 	*	are only shifted again after a strict score improvement */
 	class GridBuilder {
 	private:
+		static constexpr size_t NotReferenced = std::numeric_limits<size_t>::max();
 		enum class Alignment : uint8_t {
 			leftwards,
 			rightwards,
@@ -207,6 +209,12 @@ namespace ascg::detail {
 		struct StraightenRow {
 			TrackedRect tracked;
 			std::vector<StraightenCorner> corners;
+		};
+		struct Reducible {
+			size_t begin = 0;
+			size_t size = 0;
+			size_t previous = 0;
+			size_t index = NotReferenced;
 		};
 
 	private:
@@ -1610,7 +1618,7 @@ namespace ascg::detail {
 				endReached = true;
 			}
 		}
-		void fCompressGrid() {
+		void fCompressVertical() {
 			/* perform a full horizontal shrinking to remove any unnecessary horizontals (no need for in-depth
 			*	merging and removing, as the straightening's and interlock-fixings already do so implicitly) */
 			fShrinkHorizontal();
@@ -1633,6 +1641,129 @@ namespace ascg::detail {
 						pGrid[i][x] = pGrid[i + 1][x];
 				}
 				pGrid.erase(pGrid.begin() + drop);
+			}
+		}
+		void fCompressHorizontal() {
+			std::vector<Reducible> history, ranges, upcoming;
+
+			/* iterate as long as removable strands are found */
+			while (true) {
+				ranges.clear();
+				history.clear();
+
+				/* iterate over the rows of the grid and find a strand which pulls through the entire grid */
+				for (size_t y = 0; y < pGrid.size(); ++y) {
+					const detail::Row& row = pGrid[y];
+					upcoming.clear();
+
+					/* find the independent ranges, of which at least one cell can be removed, without the structure breaking */
+					size_t begin = 0, size = 0, lastRange = 0;
+					bool hasRemovable = false, hasCorners = false;
+					for (size_t x = 0; x <= row.size(); ++x) {
+						/* select the sell such that the last range will automatically be closed */
+						detail::Cell cell = (x < row.size() ? row[x] : detail::Cell{ detail::CellKind::vertical });
+
+						/* check if its a simple node, in which case it can just be added to the current range */
+						if (cell.simpleHorizontal()) {
+							if (size++ == 0)
+								begin = x, hasCorners = false;
+							hasRemovable = true;
+							continue;
+						}
+
+						/* check if its a closing or opening corner, in which case a strand is being started or ended (if
+						*	it has both corners, it is implicitly removable, but skip self-loops, which are not reducible) */
+						if (size == 0 && cell.cornerRight()) {
+							size = 1, begin = x, hasCorners = true, hasRemovable = false;
+							continue;
+						}
+						if (size > 0 && hasCorners && cell.cornerLeft() && (size > 1 || cell.cornerTop() != row[x - 1].cornerTop()))
+							++size, hasCorners = false, hasRemovable = true;
+
+						/* remove any partial corners and check if a valid range with removable cells remains to be added to the
+						*	set of ranges (if the end was an unused corner, reset the index to allow it to start a new range again) */
+						if (size > 0 && hasCorners)
+							++begin, --size;
+
+						Reducible reducible{ .begin = begin, .size = std::exchange(size, 0), .previous = 0, .index = NotReferenced };
+						if (cell.cornerRight())
+							--x;
+						if (!hasRemovable || reducible.size == 0)
+							continue;
+
+						/* check if this is the initial row, in which case the range can just be accepted */
+						if (y == 0) {
+							upcoming.push_back(reducible);
+							continue;
+						}
+
+						/* check if there is any overlap or touch with previous ranges, in which
+						*	case it becomes relevant and can be kept for the upcoming range */
+						for (size_t i = lastRange; i < ranges.size(); ++i) {
+							Reducible& last = ranges[i];
+
+							/* setup the indices for the cells between the ranges and fetch the rows for the compatibility check */
+							bool lastLeft = (last.begin < reducible.begin);
+							size_t left = (lastLeft ? (last.begin + last.size) : (reducible.begin + reducible.size)) - 1;
+							size_t right = (lastLeft ? reducible.begin : last.begin);
+							const detail::Row& rLast = pGrid[y - 1];
+							const detail::Row& rFirst = (lastLeft ? rLast : row);
+							const detail::Row& rLater = (lastLeft ? row : rLast);
+
+							/* check if the ranges are compatible (there are no connections between the two ranges,
+							*	including the corners on the range edges; no nodes which might be moved beneath each other) */
+							while (left <= right) {
+								if (rLast[left].anyBottom() || row[left].anyTop())
+									break;
+								if (rFirst[left].isNode() && left > 0 && rLater[left - 1].isNode())
+									break;
+								++left;
+							}
+
+							/* check if the ranges are incompatible, in which case the
+							*	problematic cell will also affect all upcoming range tests */
+							if (left <= right) {
+								if (!lastLeft)
+									break;
+								lastRange = i + 1;
+								continue;
+							}
+
+							/* this must be a valid overlap, add the previous entry to the history and add the range ot the upcoming set */
+							if (last.index == NotReferenced) {
+								last.index = history.size();
+								history.push_back(last);
+							}
+							upcoming.emplace_back(reducible).previous = last.index;
+							break;
+						}
+					}
+
+					/* check if any ranges have been found (if not, there are no reducible
+					*	ranges left and the compression is done) and advance the state */
+					if (upcoming.empty())
+						return;
+					std::swap(upcoming, ranges);
+				}
+
+				/* traverse the entire chain backwards and remove one cell from
+				*	each row (further back to reduce remove-complexity) */
+				const Reducible* range = &ranges.back();
+				for (size_t y = pGrid.size(); y > 0; --y) {
+					detail::Row& row = pGrid[y - 1];
+
+					/* select the last index of the range as the index to be removed and walk
+					*	the range further back (the first row does not have any ancestors) */
+					size_t index = (range->begin + range->size - 1);
+					if (y > 1)
+						range = &history[range->previous];
+
+					/* check if the removed cell is a corner, in which case the
+					*	z-shape must either be patched, or the corner moved */
+					if (row[index].cornerLeft())
+						row[index - 1].kind = (row[index - 1].cornerRight() ? detail::CellKind::vertical : row[index].kind);
+					row.erase(row.begin() + index);
+				}
 			}
 		}
 
@@ -1995,7 +2126,7 @@ namespace ascg::detail {
 				/* shift the rows themselves and straighten and compress the entire grid */
 				fShiftRows(nodeMap[first], nodeMap[last], leftwards, distance);
 				fFullStraighten(leftwards);
-				fCompressGrid();
+				fCompressVertical();
 
 				/* check if a strictly better result has been found and update the node map */
 				bool neutral = (pGrid.size() <= bestScore.height);
@@ -2075,7 +2206,7 @@ namespace ascg::detail {
 				/* fix any encountered interlocks (will automatically straighten the graph) and compress the grid, as the
 				*	fixes leave rows behind which only the strand removal can collapse and which would skew the score */
 				bool proceed = fFullFixInterlocks(stopIteration);
-				fCompressGrid();
+				fCompressVertical();
 
 				/* check if a new best graph has been encountered and reset all corresponding state */
 				if (fApplyBestGrid(bestGrid, bestScore, false) > 0)
@@ -2100,8 +2231,11 @@ namespace ascg::detail {
 				nodeOpen.clear(), nodeClosed.clear(), chunksShifted = true;
 			}
 
-			/* return the complete generated grid (use the best state to capture minor best scores as well) */
-			return bestGrid;
+			/* compress the best grid horizontally and return it (only the best grid, as
+			*	this leaves enough space for other height-related optimizations to occur) */
+			std::swap(pGrid, bestGrid);
+			fCompressHorizontal();
+			return std::exchange(pGrid, bestGrid);
 		}
 	};
 }
