@@ -2150,8 +2150,9 @@ namespace ascg::detail {
 				*	to the previous node benefit from, and track it, if it did not worsen the height (keep the best grid results) */
 				for (size_t first = 1; first < nodeMap.size(); ++first) {
 					for (bool leftwards : { true, false }) {
+						/* return no-improvement in case of a stop, as another iteration will otherwise start */
 						if (stopTest(ascg::Phase::render))
-							return improved;
+							return false;
 
 						/* compute the preferred distance, try to shift the chunk, and record the result */
 						size_t distance = fFindShiftDistance(nodeMap[first - 1], nodeMap[first], leftwards);
@@ -2174,8 +2175,9 @@ namespace ascg::detail {
 
 							/* the previous edge moves were neutral, try to move the entire chunk inbetween again */
 							for (size_t i = (fDistance == lDistance ? 1 : 0); i < 2; ++i) {
+								/* return no-improvement in case of a stop, as another iteration will otherwise start */
 								if (stopTest(ascg::Phase::render))
-									return improved;
+									return false;
 								if (shiftChunk(first, last, leftwards, (i == 0 ? fDistance : lDistance)).second)
 									dirty = true, improved = true;
 							}
